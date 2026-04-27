@@ -6,10 +6,6 @@ Run `agent-watch` and instantly see what all your running sessions are doing -- 
 
 ![agent-watch collapsed view](screenshot1-collapsed.png)
 
-Expand any row to preview the last prompt and Claude's latest response without leaving the dashboard:
-
-![agent-watch expanded view](screenshot2-expanded.png)
-
 ## How it works
 
 agent-watch discovers running agent processes from the OS process list, matches each to its most recent session transcript, and renders a continuously-updating dashboard.

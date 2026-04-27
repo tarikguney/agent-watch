@@ -21,7 +21,7 @@ var (
 	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#D4A0FF")) // Soft purple/lavender
 	colHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6CB6FF")) // Soft blue
 	separatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	projectStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0A458"))           // Warm amber
+	projectStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#8EC07C"))           // Soft green
 	promptStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DC4A3"))            // Soft mint/teal
 	responseStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0D0"))            // Soft lavender
 	tmuxStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EC8E0"))            // Soft cyan
@@ -32,7 +32,7 @@ var (
 	helpKeyStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6CB6FF")) // Soft blue for keys
 	helpTextStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))                // Gray for descriptions
 	providerStyles = map[string]lipgloss.Style{
-		"CLAUDE":  lipgloss.NewStyle().Foreground(lipgloss.Color("#D4A0FF")).Bold(true),
+		"CLAUDE":  lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8800")).Bold(true),
 		"COPILOT": lipgloss.NewStyle().Foreground(lipgloss.Color("#6CB6FF")).Bold(true),
 		"UNKNOWN": lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
 	}
