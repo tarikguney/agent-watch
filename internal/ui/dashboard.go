@@ -1,0 +1,612 @@
+// Copyright 2026 Tarik Guney
+// Licensed under the MIT License.
+// https://github.com/tarikguney/agent-watch
+
+package ui
+
+import (
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/tarikguney/agent-watch/internal/session"
+	"github.com/tarikguney/agent-watch/internal/tmux"
+)
+
+var (
+	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#D4A0FF")) // Soft purple/lavender
+	colHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6CB6FF")) // Soft blue
+	separatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	projectStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0A458"))           // Warm amber
+	promptStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DC4A3"))            // Soft mint/teal
+	responseStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0D0"))            // Soft lavender
+	tmuxStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EC8E0"))            // Soft cyan
+	actionStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	durationStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	pidStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#D4A0FF")) // Bright arrow indicator
+	helpKeyStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6CB6FF")) // Soft blue for keys
+	helpTextStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))                // Gray for descriptions
+	providerStyles = map[string]lipgloss.Style{
+		"CLAUDE":  lipgloss.NewStyle().Foreground(lipgloss.Color("#D4A0FF")).Bold(true),
+		"COPILOT": lipgloss.NewStyle().Foreground(lipgloss.Color("#6CB6FF")).Bold(true),
+		"UNKNOWN": lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+	}
+
+	statusStyles = map[session.Status]lipgloss.Style{
+		session.StatusThinking:    lipgloss.NewStyle().Background(lipgloss.Color("#D4A017")).Foreground(lipgloss.Color("0")).Bold(true),  // Amber bg
+		session.StatusToolUse:     lipgloss.NewStyle().Background(lipgloss.Color("10")).Foreground(lipgloss.Color("0")).Bold(true),      // Green bg
+		session.StatusStreaming:   lipgloss.NewStyle().Background(lipgloss.Color("14")).Foreground(lipgloss.Color("0")).Bold(true),      // Cyan bg
+		session.StatusResponding:  lipgloss.NewStyle().Background(lipgloss.Color("10")).Foreground(lipgloss.Color("0")).Bold(true),      // Green bg (fallback)
+		session.StatusIdle:        lipgloss.NewStyle().Background(lipgloss.Color("240")).Foreground(lipgloss.Color("15")),               // Gray bg
+		session.StatusDone:        lipgloss.NewStyle().Background(lipgloss.Color("12")).Foreground(lipgloss.Color("15")).Bold(true),     // Blue bg
+		session.StatusError:       lipgloss.NewStyle().Background(lipgloss.Color("9")).Foreground(lipgloss.Color("15")).Bold(true),      // Red bg
+		session.StatusInterrupted: lipgloss.NewStyle().Background(lipgloss.Color("11")).Foreground(lipgloss.Color("0")).Bold(true),      // Yellow bg
+		session.StatusWaiting:     lipgloss.NewStyle().Background(lipgloss.Color("13")).Foreground(lipgloss.Color("0")).Bold(true),      // Magenta bg
+	}
+)
+
+// cols holds computed column widths for a render pass.
+type cols struct {
+	pid     int
+	tmux    int
+	provider int
+	project int
+	status  int
+	action  int
+	dur     int
+}
+
+// Column caps so one very long value can't starve the action column.
+// Content longer than the cap is truncated with "…" at render time.
+const (
+	tmuxColCap    = 30
+	projectColCap = 30
+)
+
+// computeCols calculates column widths that fit the terminal on one line.
+// PID, STATUS, DURATION are small and content-sized; TMUX and PROJECT are
+// content-sized up to a cap; ACTION absorbs whatever space is left. If the
+// terminal is too narrow to give ACTION its minimum, TMUX shrinks first,
+// then PROJECT. Cell contents are truncated to these widths at render time
+// so rows never wrap.
+func computeCols(sessions []session.State, now time.Time, termW int) cols {
+	if termW <= 0 {
+		termW = 120
+	}
+
+	hasTmux := false
+	for _, s := range sessions {
+		if s.TmuxSession != "" {
+			hasTmux = true
+			break
+		}
+	}
+
+	c := cols{
+		pid:      len("PID") + 2,
+		provider: len("PROVIDER") + 2,
+		status:   len("Interrupted") + 2, // widest possible status
+		dur:      len("DURATION") + 2,
+	}
+	idealProvider := len("PROVIDER") + 2
+	idealProject := len("PROJECT") + 2
+	idealTmux := 0
+	if hasTmux {
+		idealTmux = len("TMUX SESSION/WINDOW") + 2
+	}
+
+	for _, s := range sessions {
+		pidStr := ""
+		if s.PID > 0 {
+			pidStr = fmt.Sprintf("%d", s.PID)
+		}
+		if w := len(pidStr) + 2; w > c.pid {
+			c.pid = w
+		}
+		dur := ""
+		if !s.StartTime.IsZero() {
+			dur = session.FormatDuration(now.Sub(s.StartTime))
+		}
+		if w := len(dur) + 2; w > c.dur {
+			c.dur = w
+		}
+		if w := len(providerLabel(s)) + 2; w > idealProvider {
+			idealProvider = w
+		}
+		if hasTmux {
+			if w := len(s.TmuxSession) + 2; w > idealTmux {
+				idealTmux = w
+			}
+		}
+		if w := len(s.ProjectName) + 2; w > idealProject {
+			idealProject = w
+		}
+	}
+
+	if idealTmux > tmuxColCap {
+		idealTmux = tmuxColCap
+	}
+	if idealProject > projectColCap {
+		idealProject = projectColCap
+	}
+
+	numSep := 5
+	if hasTmux {
+		numSep = 6
+	}
+	separators := numSep * 3
+
+	avail := termW - c.pid - c.provider - c.status - c.dur - separators
+	minAction := len("CURRENT ACTION") + 2
+	minProvider := len("PROV") + 2
+	minTmux := 0
+	if hasTmux {
+		minTmux = len("TMUX") + 2
+	}
+	minProject := len("PROJ") + 2
+
+	c.tmux = idealTmux
+	c.provider = idealProvider
+	c.project = idealProject
+	c.action = avail - c.tmux - c.provider - c.project
+
+	// If action is starved, steal space from tmux first, then project/provider.
+	for c.action < minAction {
+		shrunk := false
+		if c.tmux > minTmux {
+			c.tmux--
+			c.action++
+			shrunk = true
+		}
+		if c.action < minAction && c.project > minProject {
+			c.project--
+			c.action++
+			shrunk = true
+		}
+		if c.action < minAction && c.provider > minProvider {
+			c.provider--
+			c.action++
+			shrunk = true
+		}
+		if !shrunk {
+			break // terminal too narrow; accept slight overflow
+		}
+	}
+
+	return c
+}
+
+// truncate cuts s to fit in maxWidth rune cells, appending "…" when cut.
+// Newlines are flattened to spaces so a cell never spans multiple rows.
+// Width is approximated by rune count (accurate for ASCII; acceptable for
+// CJK/emoji which mostly don't appear in tmux/project/action strings).
+func truncate(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if strings.ContainsAny(s, "\r\n") {
+		s = strings.ReplaceAll(s, "\r\n", " ")
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, "\r", " ")
+	}
+	runes := []rune(s)
+	if len(runes) <= maxWidth {
+		return s
+	}
+	if maxWidth == 1 {
+		return "…"
+	}
+	return string(runes[:maxWidth-1]) + "…"
+}
+
+type tickMsg time.Time
+
+// Model is the Bubbletea model for the agent-watch dashboard.
+type Model struct {
+	scanner   *session.Scanner
+	compact   bool
+	refresh   time.Duration
+	providerFilter string
+	sessions  []session.State
+	cursorIdx int
+	expanded  map[int]bool
+	termW     int
+	termH     int
+	statusMsg string
+	statusExp time.Time
+}
+
+// NewModel creates a new dashboard Model, pre-populated with the scanner's
+// current sessions so the first render is not blank.
+func NewModel(scanner *session.Scanner, compact bool, refresh time.Duration) Model {
+	sessions := scanner.RunningSessions()
+	sortSessions(sessions)
+	return Model{
+		scanner:        scanner,
+		compact:        compact,
+		refresh:        refresh,
+		providerFilter: "all",
+		sessions:       sessions,
+		expanded:       make(map[int]bool),
+		termW:          120,
+		termH:          40,
+	}
+}
+
+func (m Model) Init() tea.Cmd {
+	return tea.Every(m.refresh, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.termW = msg.Width
+		m.termH = msg.Height
+
+	case tickMsg:
+		m.scanner.LoadAll()
+		allSessions := m.scanner.RunningSessions()
+		m.sessions = filterSessions(allSessions, m.providerFilter)
+		sortSessions(m.sessions)
+		count := len(m.sessions)
+		if count == 0 {
+			m.cursorIdx = 0
+		} else if m.cursorIdx >= count {
+			m.cursorIdx = count - 1
+		}
+		return m, tea.Every(m.refresh, func(t time.Time) tea.Msg {
+			return tickMsg(t)
+		})
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if m.cursorIdx > 0 {
+				m.cursorIdx--
+			}
+		case "down", "j":
+			if m.cursorIdx < len(m.sessions)-1 {
+				m.cursorIdx++
+			}
+		case "enter", " ":
+			if m.cursorIdx < len(m.sessions) {
+				pid := m.sessions[m.cursorIdx].PID
+				m.expanded[pid] = !m.expanded[pid]
+			}
+		case "e":
+			for _, s := range m.sessions {
+				m.expanded[s.PID] = true
+			}
+		case "c":
+			m.expanded = make(map[int]bool)
+		case "a", "A":
+			m.providerFilter = "all"
+		case "l", "L":
+			m.providerFilter = "claude"
+		case "p", "P":
+			m.providerFilter = "copilot"
+		case "g", "G":
+			if m.cursorIdx < len(m.sessions) {
+				s := m.sessions[m.cursorIdx]
+				if s.TmuxSession == "" {
+					m.statusMsg = "Session not in tmux"
+					m.statusExp = time.Now().Add(3 * time.Second)
+				} else if err := tmux.SwitchToPane(s.TmuxSession, s.TmuxPaneID); err == nil {
+					m.statusMsg = fmt.Sprintf("Switched to %s", s.TmuxSession)
+					m.statusExp = time.Now().Add(3 * time.Second)
+				} else {
+					// Programmatic switch failed — show manual navigation hint
+					parts := strings.SplitN(s.TmuxSession, "/", 2)
+					hint := "Ctrl+B, s"
+					if len(parts) == 2 {
+						hint = fmt.Sprintf("Ctrl+B, s → select \"%s\" → window \"%s\"", parts[0], parts[1])
+					}
+					m.statusMsg = fmt.Sprintf("Go to: %s  |  %s", s.TmuxSession, hint)
+					m.statusExp = time.Now().Add(5 * time.Second)
+				}
+			}
+		case "q", "Q", "ctrl+c":
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+
+func (m Model) View() string {
+	now := time.Now()
+	c := computeCols(m.sessions, now, m.termW)
+	var b strings.Builder
+
+	// Title line
+	title := titleStyle.Render("AGENT WATCH")
+	subtitle := durationStyle.Render("— monitoring agent sessions")
+	timestamp := durationStyle.Render(now.Format("01/02 15:04:05"))
+	filterTag := durationStyle.Render(fmt.Sprintf("[filter: %s]", strings.ToUpper(m.providerFilter)))
+	b.WriteString(title + " " + subtitle + " " + filterTag + "  " + timestamp + "\n")
+
+	widths := []int{c.pid, c.provider, c.project, c.status, c.action, c.dur}
+	headers := []string{
+		colHeaderStyle.Width(c.pid).Render(truncate("PID", c.pid)),
+		colHeaderStyle.Width(c.provider).Render(truncate("PROVIDER", c.provider)),
+		colHeaderStyle.Width(c.project).Render(truncate("PROJECT", c.project)),
+		colHeaderStyle.Width(c.status).Render(truncate("STATUS", c.status)),
+		colHeaderStyle.Width(c.action).Render(truncate("CURRENT ACTION", c.action)),
+		colHeaderStyle.Width(c.dur).Render(truncate("DURATION", c.dur)),
+	}
+	if c.tmux > 0 {
+		widths = append(widths[:1], append([]int{c.tmux}, widths[1:]...)...)
+		headers = append(headers[:1], append([]string{
+			colHeaderStyle.Width(c.tmux).Render(truncate("TMUX SESSION/WINDOW", c.tmux)),
+		}, headers[1:]...)...)
+	}
+	tw := totalWidth(widths)
+	b.WriteString(hline(tw) + "\n")
+	b.WriteString(joinCols(headers) + "\n")
+	b.WriteString(hline(tw) + "\n")
+
+	for i, s := range m.sessions {
+		isCursor := i == m.cursorIdx
+		isExpanded := m.expanded[s.PID]
+
+		b.WriteString(renderRow(s, now, c, isCursor) + "\n")
+
+		if !m.compact && isExpanded {
+			prompt := s.LastPrompt
+			if prompt == "" {
+				prompt = s.OriginalTask
+			}
+			if prompt != "" {
+				prefix := "  » prompt: "
+				maxLen := max(1, m.termW-len(prefix))
+				b.WriteString(
+					durationStyle.Render(prefix) +
+						promptStyle.Render(truncate(prompt, maxLen)) + "\n",
+				)
+			}
+			if s.LastResponse != "" {
+				prefix := "  » response: "
+				maxLen := max(1, m.termW-len(prefix))
+				b.WriteString(
+					durationStyle.Render(prefix) +
+						responseStyle.Render(truncate(s.LastResponse, maxLen)) + "\n",
+				)
+			}
+		}
+
+		if i < len(m.sessions)-1 {
+			b.WriteString(hline(tw) + "\n")
+		}
+	}
+
+	if len(m.sessions) == 0 {
+		b.WriteString(durationStyle.Render("  No active sessions found. Watching for new sessions...") + "\n")
+	}
+
+	// Help bar or status message (mutually exclusive to keep line count stable)
+	if !m.compact {
+		b.WriteString("\n" + hline(tw) + "\n")
+		if m.statusMsg != "" && time.Now().Before(m.statusExp) {
+			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
+			b.WriteString(warnStyle.Render("  "+m.statusMsg))
+		} else {
+			b.WriteString(
+				helpKeyStyle.Render("↑↓") + helpTextStyle.Render(" Navigate  ") +
+					helpKeyStyle.Render("Enter") + helpTextStyle.Render(" Toggle  ") +
+					helpKeyStyle.Render("g") + helpTextStyle.Render(" Go to Window  ") +
+					helpKeyStyle.Render("a/l/p") + helpTextStyle.Render(" Filter  ") +
+					helpKeyStyle.Render("e") + helpTextStyle.Render(" Expand All  ") +
+					helpKeyStyle.Render("c") + helpTextStyle.Render(" Collapse All  ") +
+					helpKeyStyle.Render("q") + helpTextStyle.Render(" Quit"),
+			)
+		}
+	}
+
+	return b.String()
+}
+
+// Render is a test-friendly wrapper: creates a Model with fixed terminal width
+// and returns View(). This keeps test assertions working without a running program.
+func Render(sessions []session.State, compact bool) string {
+	m := Model{
+		sessions:       sessions,
+		compact:        compact,
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		termW:          120,
+		termH:          40,
+	}
+	sortSessions(m.sessions)
+	return m.View()
+}
+
+func renderRow(s session.State, now time.Time, c cols, isCursor bool) string {
+	dur := ""
+	if !s.StartTime.IsZero() {
+		dur = session.FormatDuration(now.Sub(s.StartTime))
+	}
+	action := actionForStatus(s)
+	pidStr := ""
+	if s.PID > 0 {
+		pidStr = fmt.Sprintf("%d", s.PID)
+	}
+
+	// Cursor indicator occupies 2 chars (">" + " "); remaining width goes to PID value.
+	var pidCell string
+	if isCursor {
+		pidW := max(1, c.pid-2)
+		pidCell = cursorStyle.Render(">") + " " + pidStyle.Width(pidW).Render(truncate(pidStr, pidW))
+	} else {
+		pidCell = pidStyle.Width(c.pid).Render(truncate(pidStr, c.pid))
+	}
+
+	cells := []string{
+		pidCell,
+		styledProvider(providerLabel(s), c.provider),
+		projectStyle.Width(c.project).Render(truncate(s.ProjectName, c.project)),
+		styledStatus(s.Status, c.status),
+		actionStyle.Width(c.action).Render(truncate(action, c.action)),
+		durationStyle.Width(c.dur).Render(truncate(dur, c.dur)),
+	}
+
+	if c.tmux > 0 {
+		var tmuxCell string
+		if s.TmuxSession == "" {
+			tmuxCell = durationStyle.Width(c.tmux).Render(truncate("not in tmux", c.tmux))
+		} else {
+			tmuxCell = tmuxStyle.Width(c.tmux).Render(truncate(s.TmuxSession, c.tmux))
+		}
+		cells = append(cells[:1], append([]string{tmuxCell}, cells[1:]...)...)
+	}
+
+	return joinCols(cells)
+}
+
+func styledStatus(status session.Status, width int) string {
+	style, ok := statusStyles[status]
+	if !ok {
+		style = lipgloss.NewStyle()
+	}
+	return style.Width(width).Render(truncate(string(status), width))
+}
+
+func styledProvider(provider string, width int) string {
+	style, ok := providerStyles[provider]
+	if !ok {
+		style = providerStyles["UNKNOWN"]
+	}
+	return style.Width(width).Render(truncate(provider, width))
+}
+
+func joinCols(cells []string) string {
+	sep := separatorStyle.Render(" │ ")
+	return strings.Join(cells, sep)
+}
+
+func totalWidth(widths []int) int {
+	w := 0
+	for _, cw := range widths {
+		w += cw
+	}
+	w += (len(widths) - 1) * 3 // " │ " = 3 visible chars each
+	return w
+}
+
+func hline(width int) string {
+	return separatorStyle.Render(strings.Repeat("─", width))
+}
+
+// actionForStatus returns the action text appropriate for the session's status.
+// Only show the current action when Claude is actively working.
+func actionForStatus(s session.State) string {
+	switch s.Status {
+	case session.StatusThinking:
+		return "Thinking..."
+	case session.StatusToolUse:
+		if s.CurrentAction != "" {
+			return s.CurrentAction
+		}
+		return "Executing tool..."
+	case session.StatusStreaming:
+		return "Streaming response..."
+	case session.StatusResponding:
+		if s.CurrentAction != "" {
+			return s.CurrentAction
+		}
+		return "Processing..."
+	case session.StatusDone:
+		return "Completed"
+	case session.StatusInterrupted:
+		return "Interrupted by user"
+	case session.StatusWaiting:
+		return "Waiting for first prompt..."
+	default:
+		return ""
+	}
+}
+
+func statusPriority(s session.Status) int {
+	switch s {
+	case session.StatusThinking:
+		return 0
+	case session.StatusToolUse:
+		return 0
+	case session.StatusStreaming:
+		return 0
+	case session.StatusResponding:
+		return 0
+	case session.StatusError:
+		return 1
+	case session.StatusInterrupted:
+		return 2
+	case session.StatusIdle:
+		return 3
+	case session.StatusWaiting:
+		return 4
+	case session.StatusDone:
+		return 5
+	default:
+		return 6
+	}
+}
+
+func providerLabel(s session.State) string {
+	if strings.EqualFold(s.Provider, "claude") {
+		return "CLAUDE"
+	}
+	if strings.EqualFold(s.Provider, "copilot") {
+		return "COPILOT"
+	}
+	lowerPath := strings.ToLower(s.FilePath)
+	if strings.Contains(lowerPath, string(filepath.Separator)+".copilot"+string(filepath.Separator)+"session-state"+string(filepath.Separator)) ||
+		strings.Contains(lowerPath, "/.copilot/session-state/") ||
+		strings.Contains(lowerPath, `\.copilot\session-state\`) {
+		return "COPILOT"
+	}
+	if s.FilePath != "" {
+		return "CLAUDE"
+	}
+	return "UNKNOWN"
+}
+
+func providerRank(s session.State) int {
+	switch providerLabel(s) {
+	case "CLAUDE":
+		return 0
+	case "COPILOT":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func sortSessions(sessions []session.State) {
+	sort.Slice(sessions, func(i, j int) bool {
+		ri := providerRank(sessions[i])
+		rj := providerRank(sessions[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return sessions[i].PID < sessions[j].PID
+	})
+}
+
+func filterSessions(sessions []session.State, provider string) []session.State {
+	if provider == "" || strings.EqualFold(provider, "all") {
+		return sessions
+	}
+	filtered := make([]session.State, 0, len(sessions))
+	target := strings.ToUpper(strings.TrimSpace(provider))
+	for _, s := range sessions {
+		if providerLabel(s) == target {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
