@@ -107,7 +107,7 @@ func (p *copilotProvider) LoadSession(path string, current State) (State, error)
 	}
 	if state.ProjectName == "" {
 		if state.Cwd != "" {
-			state.ProjectName = filepath.Base(state.Cwd)
+			state.ProjectName = projectNameFromCwd(state.Cwd)
 		} else if workspace.Repository != "" {
 			state.ProjectName = workspace.Repository
 		}
@@ -198,7 +198,7 @@ func (p *copilotProvider) UpdateSession(path string, current State) (State, erro
 
 	if state.ProjectName == "" {
 		if state.Cwd != "" {
-			state.ProjectName = filepath.Base(state.Cwd)
+			state.ProjectName = projectNameFromCwd(state.Cwd)
 		}
 	}
 	if state.SessionID == "" {
@@ -251,7 +251,7 @@ func (p *copilotProvider) MatchProcesses(sessions map[string]*State, procs []Pro
 			state.Provider = "copilot"
 			if proc.Cwd != "" {
 				state.Cwd = proc.Cwd
-				state.ProjectName = filepath.Base(proc.Cwd)
+				state.ProjectName = projectNameFromCwd(proc.Cwd)
 			}
 			if proc.SessionID != "" {
 				state.SessionID = proc.SessionID
@@ -403,4 +403,18 @@ func parseWorkspaceTime(value string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+func projectNameFromCwd(cwd string) string {
+	cleaned := strings.TrimSpace(cwd)
+	cleaned = strings.TrimRight(cleaned, "/\\")
+	if cleaned == "" {
+		return ""
+	}
+
+	lastSep := strings.LastIndexAny(cleaned, "/\\")
+	if lastSep == -1 || lastSep == len(cleaned)-1 {
+		return cleaned
+	}
+	return cleaned[lastSep+1:]
 }
