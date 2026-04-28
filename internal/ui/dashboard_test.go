@@ -6,11 +6,60 @@ package ui
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/tarikguney/agent-watch/internal/notify"
 	"github.com/tarikguney/agent-watch/internal/session"
 )
+
+type fakeNotifier struct {
+	mu            sync.Mutex
+	supported     bool
+	notifications []notify.Notification
+}
+
+func (f *fakeNotifier) Notify(n notify.Notification) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notifications = append(f.notifications, n)
+	return nil
+}
+
+func (f *fakeNotifier) Supported() bool {
+	return f.supported
+}
+
+func (f *fakeNotifier) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.notifications)
+}
+
+func (f *fakeNotifier) titleAt(i int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.notifications[i].Title
+}
+
+func (f *fakeNotifier) messageAt(i int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.notifications[i].Message
+}
+
+// waitForCount waits up to 1s for the notifier to receive `want` notifications.
+func waitForCount(f *fakeNotifier, want int) bool {
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.count() >= want {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return f.count() >= want
+}
 
 func TestRender_EmptySessions(t *testing.T) {
 	output := Render(nil, false)
@@ -318,11 +367,11 @@ func TestRender_NewStatuses(t *testing.T) {
 	now := time.Now()
 	sessions := []session.State{
 		{
-			PID:           101,
-			ProjectName:   "thinking-project",
-			Status:        session.StatusThinking,
-			StartTime:     now.Add(-1 * time.Minute),
-			LastUpdate:    now,
+			PID:         101,
+			ProjectName: "thinking-project",
+			Status:      session.StatusThinking,
+			StartTime:   now.Add(-1 * time.Minute),
+			LastUpdate:  now,
 		},
 		{
 			PID:           102,
@@ -333,11 +382,11 @@ func TestRender_NewStatuses(t *testing.T) {
 			LastUpdate:    now,
 		},
 		{
-			PID:           103,
-			ProjectName:   "stream-project",
-			Status:        session.StatusStreaming,
-			StartTime:     now.Add(-3 * time.Minute),
-			LastUpdate:    now,
+			PID:         103,
+			ProjectName: "stream-project",
+			Status:      session.StatusStreaming,
+			StartTime:   now.Add(-3 * time.Minute),
+			LastUpdate:  now,
 		},
 	}
 
@@ -360,5 +409,235 @@ func TestRender_NewStatuses(t *testing.T) {
 	}
 	if !strings.Contains(output, "Streaming response...") {
 		t.Error("expected 'Streaming response...' action text")
+	}
+}
+
+func TestProcessNotifications_TerminalTransitionSendsNotification(t *testing.T) {
+	notifier := &fakeNotifier{supported: true}
+	now := time.Now()
+	m := Model{
+		notifier:             notifier,
+		notificationsEnabled: true,
+		mutedNotifications:   make(map[string]bool),
+		notificationStates: map[string]session.Status{
+			`c:\work\demo`: session.StatusResponding,
+		},
+		notificationStartedAt: now.Add(-1 * time.Minute),
+	}
+
+	m.processNotifications([]session.State{
+		{
+			Provider:     "claude",
+			PID:          12345,
+			Cwd:          `C:\work\demo`,
+			ProjectName:  "demo",
+			Status:       session.StatusDone,
+			LastPrompt:   "add Windows notifications",
+			LastResponse: "Windows notifications are enabled by default on Windows.",
+			LastUpdate:   now,
+		},
+	})
+
+	if !waitForCount(notifier, 1) {
+		t.Fatalf("expected 1 notification, got %d", notifier.count())
+	}
+	if notifier.titleAt(0) != "CLAUDE completed: demo" {
+		t.Fatalf("unexpected notification title: %q", notifier.titleAt(0))
+	}
+	wantMessage := "Project: demo\nPrompt: add Windows notifications\nResponse: Windows notifications are enabled by default on Windows."
+	if notifier.messageAt(0) != wantMessage {
+		t.Fatalf("unexpected notification message: %q", notifier.messageAt(0))
+	}
+}
+
+func TestProcessNotifications_GlobalDisableSuppressesNotification(t *testing.T) {
+	notifier := &fakeNotifier{supported: true}
+	now := time.Now()
+	m := Model{
+		notifier:             notifier,
+		notificationsEnabled: false,
+		mutedNotifications:   make(map[string]bool),
+		notificationStates: map[string]session.Status{
+			`c:\work\demo`: session.StatusResponding,
+		},
+		notificationStartedAt: now.Add(-1 * time.Minute),
+	}
+
+	m.processNotifications([]session.State{
+		{
+			Provider:    "claude",
+			PID:         12345,
+			Cwd:         `C:\work\demo`,
+			ProjectName: "demo",
+			Status:      session.StatusDone,
+			LastUpdate:  now,
+		},
+	})
+
+	// Give async dispatch a moment, then verify suppression.
+	time.Sleep(50 * time.Millisecond)
+	if notifier.count() != 0 {
+		t.Fatalf("expected no notifications when globally disabled, got %d", notifier.count())
+	}
+}
+
+func TestProcessNotifications_MutedRowSuppressesNotification(t *testing.T) {
+	notifier := &fakeNotifier{supported: true}
+	now := time.Now()
+	key := sessionNotificationKey(session.State{Cwd: `C:\work\demo`})
+	m := Model{
+		notifier:             notifier,
+		notificationsEnabled: true,
+		mutedNotifications: map[string]bool{
+			key: true,
+		},
+		notificationStates: map[string]session.Status{
+			key: session.StatusResponding,
+		},
+		notificationStartedAt: now.Add(-1 * time.Minute),
+	}
+
+	m.processNotifications([]session.State{
+		{
+			Provider:    "claude",
+			PID:         12345,
+			Cwd:         `C:\work\demo`,
+			ProjectName: "demo",
+			Status:      session.StatusError,
+			LastUpdate:  now,
+		},
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if notifier.count() != 0 {
+		t.Fatalf("expected no notifications for muted row, got %d", notifier.count())
+	}
+}
+
+func TestProcessNotifications_IgnoresSessionsWithoutPID(t *testing.T) {
+	notifier := &fakeNotifier{supported: true}
+	now := time.Now()
+	m := Model{
+		notifier:             notifier,
+		notificationsEnabled: true,
+		mutedNotifications:   make(map[string]bool),
+		notificationStates: map[string]session.Status{
+			`c:\work\demo`: session.StatusResponding,
+		},
+		notificationStartedAt: now.Add(-1 * time.Minute),
+	}
+
+	m.processNotifications([]session.State{
+		{
+			Provider:    "claude",
+			PID:         0,
+			Cwd:         `C:\work\demo`,
+			ProjectName: "demo",
+			Status:      session.StatusDone,
+			LastUpdate:  now,
+		},
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if notifier.count() != 0 {
+		t.Fatalf("expected no notifications for non-running session, got %d", notifier.count())
+	}
+}
+
+func TestNotificationSessionCandidates_DedupesByKey(t *testing.T) {
+	now := time.Now()
+	sessions := []session.State{
+		{
+			Provider:    "claude",
+			PID:         0,
+			Cwd:         `C:\work\demo`,
+			ProjectName: "demo-old",
+			Status:      session.StatusDone,
+			LastUpdate:  now.Add(-5 * time.Minute),
+		},
+		{
+			Provider:    "claude",
+			PID:         999,
+			Cwd:         `C:\work\demo`,
+			ProjectName: "demo-live",
+			Status:      session.StatusError,
+			LastUpdate:  now,
+		},
+	}
+
+	got := notificationSessionCandidates(sessions)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 deduped session, got %d", len(got))
+	}
+	if got[0].PID != 999 {
+		t.Fatalf("expected live session to win dedupe, got PID %d", got[0].PID)
+	}
+}
+
+func TestProcessNotifications_IdleAfterWorkSendsNotification(t *testing.T) {
+	notifier := &fakeNotifier{supported: true}
+	now := time.Now()
+	m := Model{
+		notifier:             notifier,
+		notificationsEnabled: true,
+		mutedNotifications:   make(map[string]bool),
+		notificationStates: map[string]session.Status{
+			`c:\work\demo`: session.StatusResponding,
+		},
+		notificationStartedAt: now.Add(-1 * time.Minute),
+	}
+
+	m.processNotifications([]session.State{
+		{
+			Provider:     "claude",
+			PID:          12345,
+			Cwd:          `C:\work\demo`,
+			ProjectName:  "demo",
+			Status:       session.StatusIdle,
+			LastPrompt:   "summarize current changes",
+			LastResponse: "Done. I summarized the latest code updates.",
+			LastUpdate:   now,
+		},
+	})
+
+	if !waitForCount(notifier, 1) {
+		t.Fatalf("expected 1 notification, got %d", notifier.count())
+	}
+	if notifier.titleAt(0) != "CLAUDE response complete: demo" {
+		t.Fatalf("unexpected notification title: %q", notifier.titleAt(0))
+	}
+}
+
+func TestProcessNotifications_CooldownSuppressesRapidDuplicate(t *testing.T) {
+	notifier := &fakeNotifier{supported: true}
+	now := time.Now()
+	key := sessionNotificationKey(session.State{Cwd: `C:\work\demo`})
+	m := Model{
+		notifier:             notifier,
+		notificationsEnabled: true,
+		mutedNotifications:   make(map[string]bool),
+		notificationStates: map[string]session.Status{
+			key: session.StatusResponding,
+		},
+		notificationLastSent: map[string]time.Time{
+			key: now,
+		},
+		notificationStartedAt: now.Add(-1 * time.Minute),
+	}
+
+	m.processNotifications([]session.State{
+		{
+			Provider:    "claude",
+			PID:         12345,
+			Cwd:         `C:\work\demo`,
+			ProjectName: "demo",
+			Status:      session.StatusIdle,
+			LastUpdate:  now,
+		},
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if notifier.count() != 0 {
+		t.Fatalf("expected cooldown to suppress notification, got %d", notifier.count())
 	}
 }

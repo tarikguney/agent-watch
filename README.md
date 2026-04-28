@@ -58,6 +58,12 @@ agent-watch --provider copilot --copilot-dir /path/to/.copilot
 
 # Compact mode for narrow tmux panes
 agent-watch --compact
+
+# Disable Windows notifications
+agent-watch --windows-notifications=false
+
+# Send a sample Windows notification and exit
+agent-watch --test-windows-notification
 ```
 
 ## Keyboard shortcuts
@@ -67,6 +73,8 @@ agent-watch --compact
 | `↑` / `↓` (or `k` / `j`) | Move the cursor between sessions |
 | `Enter` / `Space` | Toggle expansion for the selected session (show last prompt + response) |
 | `a` / `l` / `p` | Filter view to all / Claude / Copilot sessions |
+| `n` | Toggle Windows notifications on / off |
+| `m` | Mute or unmute Windows notifications for the selected row for the current run |
 | `e` | Expand all rows |
 | `c` | Collapse all rows |
 | `g` | Go to the session's tmux/psmux window (jumps the active client) |
@@ -104,6 +112,10 @@ When a row is expanded, two extra lines appear beneath it:
 ## tmux / psmux integration
 
 agent-watch detects tmux, psmux, and pmux automatically (set `CLAUDE_WATCH_TMUX_BIN` to override). When a session process lives inside a multiplexer pane, the dashboard shows its `session/window` name and lets you jump straight to it with `g`. If programmatic switching fails (e.g. you're attached from a different client), the status bar prints the manual `Ctrl+B, s` navigation hint for that session.
+
+## Windows notifications
+
+On Windows, `agent-watch` sends native notifications when a session transitions to **response complete** (`Idle` after active work), **Done**, or **Error**. Notifications are enabled by default on Windows, can be disabled globally with `--windows-notifications=false`, and can be muted for a selected row during the current run with `m`.
 
 ## Platform support
 

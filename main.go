@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
+	"github.com/tarikguney/agent-watch/internal/notify"
 	"github.com/tarikguney/agent-watch/internal/session"
 	"github.com/tarikguney/agent-watch/internal/tmux"
 	"github.com/tarikguney/agent-watch/internal/ui"
@@ -35,6 +36,8 @@ func main() {
 	var claudeDir string
 	var copilotDir string
 	var compact bool
+	var windowsNotifications bool
+	var testWindowsNotification bool
 
 	rootCmd := &cobra.Command{
 		Use:     "agent-watch",
@@ -43,9 +46,20 @@ func main() {
 		Long: `A zero-setup CLI dashboard for monitoring Claude Code agents.
 Discovers sessions automatically from ~/.claude/projects/.
 
+On Windows, agent-watch can send native notifications when sessions
+complete or error.
+
 Source: https://github.com/tarikguney/agent-watch`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(provider, claudeDir, copilotDir, refresh, compact)
+			return run(
+				provider,
+				claudeDir,
+				copilotDir,
+				refresh,
+				compact,
+				windowsNotifications,
+				testWindowsNotification,
+			)
 		},
 	}
 
@@ -54,17 +68,43 @@ Source: https://github.com/tarikguney/agent-watch`,
 	rootCmd.Flags().StringVar(&claudeDir, "claude-dir", defaultClaudeDir(), "Path to Claude config directory")
 	rootCmd.Flags().StringVar(&copilotDir, "copilot-dir", defaultCopilotDir(), "Path to Copilot config directory")
 	rootCmd.Flags().BoolVar(&compact, "compact", false, "Compact mode for narrow terminals")
+	rootCmd.Flags().BoolVar(
+		&windowsNotifications,
+		"windows-notifications",
+		runtime.GOOS == "windows",
+		"Enable native Windows notifications for completed or errored sessions (Windows only)",
+	)
+	rootCmd.Flags().BoolVar(
+		&testWindowsNotification,
+		"test-windows-notification",
+		false,
+		"Send a sample Windows notification and exit (Windows only)",
+	)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func run(provider, claudeDir, copilotDir string, refresh time.Duration, compact bool) error {
+func run(
+	provider, claudeDir, copilotDir string,
+	refresh time.Duration,
+	compact bool,
+	windowsNotifications bool,
+	testWindowsNotification bool,
+) error {
 	// Redirect log output away from stderr so watcher/event-loop warnings
 	// don't corrupt the Bubble Tea alt-screen. Failures fall back to discard.
 	if closer := redirectLog(); closer != nil {
 		defer closer()
+	}
+
+	notifier := notify.NewWindowsNotifier()
+	if testWindowsNotification {
+		return runWindowsNotificationTest(notifier)
+	}
+	if windowsNotifications && !notifier.Supported() {
+		return fmt.Errorf("--windows-notifications is only supported on Windows")
 	}
 
 	scanner, err := newScanner(provider, claudeDir, copilotDir)
@@ -110,10 +150,20 @@ func run(provider, claudeDir, copilotDir string, refresh time.Duration, compact 
 		}
 	}()
 
-	m := ui.NewModel(scanner, compact, refresh)
+	m := ui.NewModel(scanner, compact, refresh, notifier, windowsNotifications)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+func runWindowsNotificationTest(notifier notify.Notifier) error {
+	if !notifier.Supported() {
+		return fmt.Errorf("--test-windows-notification is only supported on Windows")
+	}
+	return notifier.Notify(notify.Notification{
+		Title:   "agent-watch test notification",
+		Message: "Windows notifications are enabled for agent-watch.",
+	})
 }
 
 func newScanner(provider, claudeDir, copilotDir string) (*session.Scanner, error) {

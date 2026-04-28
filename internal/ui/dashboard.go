@@ -6,6 +6,7 @@ package ui
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/tarikguney/agent-watch/internal/notify"
 	"github.com/tarikguney/agent-watch/internal/session"
 	"github.com/tarikguney/agent-watch/internal/tmux"
 )
@@ -21,10 +23,10 @@ var (
 	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#D4A0FF")) // Soft purple/lavender
 	colHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6CB6FF")) // Soft blue
 	separatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	projectStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#8EC07C"))           // Soft green
-	promptStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DC4A3"))            // Soft mint/teal
-	responseStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0D0"))            // Soft lavender
-	tmuxStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EC8E0"))            // Soft cyan
+	projectStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#8EC07C")) // Soft green
+	promptStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DC4A3")) // Soft mint/teal
+	responseStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0D0")) // Soft lavender
+	tmuxStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#9EC8E0")) // Soft cyan
 	actionStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
 	durationStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	pidStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -38,7 +40,7 @@ var (
 	}
 
 	statusStyles = map[session.Status]lipgloss.Style{
-		session.StatusThinking:    lipgloss.NewStyle().Background(lipgloss.Color("#D4A017")).Foreground(lipgloss.Color("0")).Bold(true),  // Amber bg
+		session.StatusThinking:    lipgloss.NewStyle().Background(lipgloss.Color("#D4A017")).Foreground(lipgloss.Color("0")).Bold(true), // Amber bg
 		session.StatusToolUse:     lipgloss.NewStyle().Background(lipgloss.Color("10")).Foreground(lipgloss.Color("0")).Bold(true),      // Green bg
 		session.StatusStreaming:   lipgloss.NewStyle().Background(lipgloss.Color("14")).Foreground(lipgloss.Color("0")).Bold(true),      // Cyan bg
 		session.StatusResponding:  lipgloss.NewStyle().Background(lipgloss.Color("10")).Foreground(lipgloss.Color("0")).Bold(true),      // Green bg (fallback)
@@ -52,20 +54,21 @@ var (
 
 // cols holds computed column widths for a render pass.
 type cols struct {
-	pid     int
-	tmux    int
+	pid      int
+	tmux     int
 	provider int
-	project int
-	status  int
-	action  int
-	dur     int
+	project  int
+	status   int
+	action   int
+	dur      int
 }
 
 // Column caps so one very long value can't starve the action column.
 // Content longer than the cap is truncated with "…" at render time.
 const (
-	tmuxColCap    = 30
-	projectColCap = 30
+	tmuxColCap           = 30
+	projectColCap        = 30
+	notificationCooldown = 4 * time.Second
 )
 
 // computeCols calculates column widths that fit the terminal on one line.
@@ -208,33 +211,51 @@ type tickMsg time.Time
 
 // Model is the Bubbletea model for the agent-watch dashboard.
 type Model struct {
-	scanner   *session.Scanner
-	compact   bool
-	refresh   time.Duration
-	providerFilter string
-	sessions  []session.State
-	cursorIdx int
-	expanded  map[int]bool
-	termW     int
-	termH     int
-	statusMsg string
-	statusExp time.Time
+	scanner               *session.Scanner
+	compact               bool
+	refresh               time.Duration
+	providerFilter        string
+	sessions              []session.State
+	cursorIdx             int
+	expanded              map[int]bool
+	termW                 int
+	termH                 int
+	statusMsg             string
+	statusExp             time.Time
+	notifier              notify.Notifier
+	notificationsEnabled  bool
+	mutedNotifications    map[string]bool
+	notificationStates    map[string]session.Status
+	notificationLastSent  map[string]time.Time
+	notificationStartedAt time.Time
 }
 
 // NewModel creates a new dashboard Model, pre-populated with the scanner's
 // current sessions so the first render is not blank.
-func NewModel(scanner *session.Scanner, compact bool, refresh time.Duration) Model {
+func NewModel(
+	scanner *session.Scanner,
+	compact bool,
+	refresh time.Duration,
+	notifier notify.Notifier,
+	notificationsEnabled bool,
+) Model {
 	sessions := scanner.RunningSessions()
 	sortSessions(sessions)
 	return Model{
-		scanner:        scanner,
-		compact:        compact,
-		refresh:        refresh,
-		providerFilter: "all",
-		sessions:       sessions,
-		expanded:       make(map[int]bool),
-		termW:          120,
-		termH:          40,
+		scanner:               scanner,
+		compact:               compact,
+		refresh:               refresh,
+		providerFilter:        "all",
+		sessions:              sessions,
+		expanded:              make(map[int]bool),
+		termW:                 120,
+		termH:                 40,
+		notifier:              notifier,
+		notificationsEnabled:  notificationsEnabled,
+		mutedNotifications:    make(map[string]bool),
+		notificationStates:    snapshotNotificationStates(notificationSessionCandidates(scanner.Sessions())),
+		notificationLastSent:  make(map[string]time.Time),
+		notificationStartedAt: time.Now(),
 	}
 }
 
@@ -252,8 +273,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.scanner.LoadAll()
-		allSessions := m.scanner.RunningSessions()
-		m.sessions = filterSessions(allSessions, m.providerFilter)
+		allSessions := m.scanner.Sessions()
+		m.processNotifications(notificationSessionCandidates(allSessions))
+		visibleSessions := m.scanner.RunningSessions()
+		m.sessions = filterSessions(visibleSessions, m.providerFilter)
 		sortSessions(m.sessions)
 		count := len(m.sessions)
 		if count == 0 {
@@ -290,6 +313,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.providerFilter = "all"
 		case "l", "L":
 			m.providerFilter = "claude"
+		case "m", "M":
+			m.toggleSelectedMute()
+		case "n", "N":
+			m.toggleNotifications()
 		case "p", "P":
 			m.providerFilter = "copilot"
 		case "g", "G":
@@ -329,7 +356,15 @@ func (m Model) View() string {
 	subtitle := durationStyle.Render("— monitoring agent sessions")
 	timestamp := durationStyle.Render(now.Format("01/02 15:04:05"))
 	filterTag := durationStyle.Render(fmt.Sprintf("[filter: %s]", strings.ToUpper(m.providerFilter)))
-	b.WriteString(title + " " + subtitle + " " + filterTag + "  " + timestamp + "\n")
+	titleParts := []string{title, subtitle, filterTag}
+	if m.notifier != nil {
+		titleParts = append(titleParts, durationStyle.Render(m.notificationTag()))
+		if mutedTag := m.selectedMutedTag(); mutedTag != "" {
+			titleParts = append(titleParts, durationStyle.Render(mutedTag))
+		}
+	}
+	titleParts = append(titleParts, timestamp)
+	b.WriteString(strings.Join(titleParts, " ") + "\n")
 
 	widths := []int{c.pid, c.provider, c.project, c.status, c.action, c.dur}
 	headers := []string{
@@ -394,12 +429,13 @@ func (m Model) View() string {
 		b.WriteString("\n" + hline(tw) + "\n")
 		if m.statusMsg != "" && time.Now().Before(m.statusExp) {
 			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
-			b.WriteString(warnStyle.Render("  "+m.statusMsg))
+			b.WriteString(warnStyle.Render("  " + m.statusMsg))
 		} else {
 			b.WriteString(
 				helpKeyStyle.Render("↑↓") + helpTextStyle.Render(" Navigate  ") +
 					helpKeyStyle.Render("Enter") + helpTextStyle.Render(" Toggle  ") +
 					helpKeyStyle.Render("g") + helpTextStyle.Render(" Go to Window  ") +
+					m.notificationHelp() +
 					helpKeyStyle.Render("a/l/p") + helpTextStyle.Render(" Filter  ") +
 					helpKeyStyle.Render("e") + helpTextStyle.Render(" Expand All  ") +
 					helpKeyStyle.Render("c") + helpTextStyle.Render(" Collapse All  ") +
@@ -409,6 +445,280 @@ func (m Model) View() string {
 	}
 
 	return b.String()
+}
+
+func (m *Model) processNotifications(allSessions []session.State) {
+	if m.notificationLastSent == nil {
+		m.notificationLastSent = make(map[string]time.Time)
+	}
+
+	previous := m.notificationStates
+	current := snapshotNotificationStates(allSessions)
+
+	for _, s := range allSessions {
+		// Only evaluate sessions with a live process. Notifications should track
+		// what the dashboard is actively monitoring, not stale transcript entries.
+		if s.PID <= 0 {
+			continue
+		}
+		key := sessionNotificationKey(s)
+		if key == "" {
+			continue
+		}
+
+		prevStatus, hadPrevious := previous[key]
+		shouldNotify := false
+		if hadPrevious {
+			shouldNotify = shouldNotifyStatusTransition(prevStatus, s.Status)
+		} else if s.LastUpdate.After(m.notificationStartedAt) || s.FileModTime.After(m.notificationStartedAt) {
+			shouldNotify = isNotifiableStatus(s.Status)
+		}
+
+		if !shouldNotify || !m.notificationsEnabled || !m.notifierAvailable() || m.mutedNotifications[key] {
+			continue
+		}
+		if lastSent, ok := m.notificationLastSent[key]; ok && time.Since(lastSent) < notificationCooldown {
+			continue
+		}
+
+		// Fire async: go-toast spawns powershell.exe and blocks for 2-3s.
+		// Inside Bubble Tea's Update loop with the alt-screen TTY active,
+		// a synchronous call freezes the UI and can prevent the toast banner
+		// from rendering (only the sound plays). A goroutine isolates it.
+		notification := notificationForSession(s)
+		project := displayProjectName(s)
+		notifier := m.notifier
+		m.notificationLastSent[key] = time.Now()
+		go func() {
+			if err := notifier.Notify(notification); err != nil {
+				log.Printf("windows notification failed for %s: %v", project, err)
+			}
+		}()
+	}
+
+	m.notificationStates = current
+}
+
+func (m *Model) toggleNotifications() {
+	if !m.notifierAvailable() {
+		m.setStatusMessage("Windows notifications are unavailable in this environment", 4*time.Second)
+		return
+	}
+
+	m.notificationsEnabled = !m.notificationsEnabled
+	if m.notificationsEnabled {
+		m.setStatusMessage("Windows notifications enabled", 3*time.Second)
+		return
+	}
+	m.setStatusMessage("Windows notifications disabled", 3*time.Second)
+}
+
+func (m *Model) toggleSelectedMute() {
+	if !m.notifierAvailable() {
+		m.setStatusMessage("Windows notifications are unavailable in this environment", 4*time.Second)
+		return
+	}
+	if len(m.sessions) == 0 || m.cursorIdx >= len(m.sessions) {
+		return
+	}
+
+	selected := m.sessions[m.cursorIdx]
+	key := sessionNotificationKey(selected)
+	if key == "" {
+		m.setStatusMessage("Selected row cannot be muted", 3*time.Second)
+		return
+	}
+
+	project := displayProjectName(selected)
+	if m.mutedNotifications[key] {
+		delete(m.mutedNotifications, key)
+		m.setStatusMessage(fmt.Sprintf("Windows notifications unmuted for %s", project), 3*time.Second)
+		return
+	}
+
+	m.mutedNotifications[key] = true
+	m.setStatusMessage(fmt.Sprintf("Windows notifications muted for %s", project), 3*time.Second)
+}
+
+func (m *Model) setStatusMessage(msg string, duration time.Duration) {
+	m.statusMsg = msg
+	m.statusExp = time.Now().Add(duration)
+}
+
+func (m Model) notificationHelp() string {
+	if m.notifier == nil {
+		return ""
+	}
+	return helpKeyStyle.Render("n") + helpTextStyle.Render(" Win Notify  ") +
+		helpKeyStyle.Render("m") + helpTextStyle.Render(" Mute Row  ")
+}
+
+func (m Model) notificationTag() string {
+	if !m.notifierAvailable() {
+		return "[win notify: unavailable]"
+	}
+	if m.notificationsEnabled {
+		return "[win notify: on]"
+	}
+	return "[win notify: off]"
+}
+
+func (m Model) selectedMutedTag() string {
+	if len(m.sessions) == 0 || m.cursorIdx >= len(m.sessions) {
+		return ""
+	}
+	key := sessionNotificationKey(m.sessions[m.cursorIdx])
+	if !m.mutedNotifications[key] {
+		return ""
+	}
+	return fmt.Sprintf("[muted: %s]", displayProjectName(m.sessions[m.cursorIdx]))
+}
+
+func (m Model) notifierAvailable() bool {
+	return m.notifier != nil && m.notifier.Supported()
+}
+
+func snapshotNotificationStates(sessions []session.State) map[string]session.Status {
+	snapshot := make(map[string]session.Status, len(sessions))
+	for _, s := range sessions {
+		key := sessionNotificationKey(s)
+		if key == "" {
+			continue
+		}
+		snapshot[key] = s.Status
+	}
+	return snapshot
+}
+
+// notificationSessionCandidates deduplicates sessions by notification key and
+// keeps the most relevant state per key.
+func notificationSessionCandidates(sessions []session.State) []session.State {
+	best := make(map[string]session.State)
+	for _, s := range sessions {
+		key := sessionNotificationKey(s)
+		if key == "" {
+			continue
+		}
+		current, ok := best[key]
+		if !ok || moreRelevantNotificationState(s, current) {
+			best[key] = s
+		}
+	}
+	result := make([]session.State, 0, len(best))
+	for _, s := range best {
+		result = append(result, s)
+	}
+	return result
+}
+
+func moreRelevantNotificationState(a, b session.State) bool {
+	if (a.PID > 0) != (b.PID > 0) {
+		return a.PID > 0
+	}
+	if a.LastUpdate != b.LastUpdate {
+		return a.LastUpdate.After(b.LastUpdate)
+	}
+	if a.FileModTime != b.FileModTime {
+		return a.FileModTime.After(b.FileModTime)
+	}
+	return a.Status != session.StatusDone && b.Status == session.StatusDone
+}
+
+func shouldNotifyStatusTransition(previous, current session.Status) bool {
+	switch current {
+	case session.StatusError:
+		return previous != session.StatusError
+	case session.StatusDone:
+		return previous != session.StatusDone
+	case session.StatusIdle:
+		return isActiveWorkStatus(previous)
+	default:
+		return false
+	}
+}
+
+func isNotifiableStatus(status session.Status) bool {
+	return status == session.StatusDone || status == session.StatusError || status == session.StatusIdle
+}
+
+func isActiveWorkStatus(status session.Status) bool {
+	return status == session.StatusThinking ||
+		status == session.StatusToolUse ||
+		status == session.StatusStreaming ||
+		status == session.StatusResponding
+}
+
+func sessionNotificationKey(s session.State) string {
+	switch {
+	case s.Cwd != "":
+		return strings.ToLower(filepath.Clean(s.Cwd))
+	case s.FilePath != "":
+		return strings.ToLower(filepath.Clean(s.FilePath))
+	case s.SessionID != "":
+		return strings.ToLower(s.SessionID)
+	default:
+		return ""
+	}
+}
+
+func displayProjectName(s session.State) string {
+	if s.ProjectName != "" {
+		return s.ProjectName
+	}
+	if s.Cwd != "" {
+		return filepath.Base(s.Cwd)
+	}
+	if s.FilePath != "" {
+		return filepath.Base(filepath.Dir(s.FilePath))
+	}
+	return "unknown project"
+}
+
+func notificationForSession(s session.State) notify.Notification {
+	project := displayProjectName(s)
+	title := fmt.Sprintf("%s completed: %s", providerLabel(s), project)
+	switch s.Status {
+	case session.StatusError:
+		title = fmt.Sprintf("%s error: %s", providerLabel(s), project)
+	case session.StatusIdle:
+		title = fmt.Sprintf("%s response complete: %s", providerLabel(s), project)
+	}
+
+	prompt := "n/a"
+	if s.LastPrompt != "" {
+		prompt = truncateNotificationLine(s.LastPrompt, 120)
+	}
+
+	response := "n/a"
+	if s.LastResponse != "" {
+		response = truncateNotificationLine(s.LastResponse, 120)
+	}
+
+	message := strings.Join([]string{
+		"Project: " + truncateNotificationLine(project, 60),
+		"Prompt: " + prompt,
+		"Response: " + response,
+	}, "\n")
+
+	return notify.Notification{
+		Title:   title,
+		Message: message,
+	}
+}
+
+func truncateNotificationLine(s string, maxLen int) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	if maxLen <= 1 {
+		return string(runes[:1])
+	}
+	return string(runes[:maxLen-1]) + "…"
 }
 
 // Render is a test-friendly wrapper: creates a Model with fixed terminal width
