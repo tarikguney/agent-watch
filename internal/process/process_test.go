@@ -204,6 +204,49 @@ func TestIsCopilotCommand(t *testing.T) {
 	}
 }
 
+func TestIsClaudeCommand(t *testing.T) {
+	tests := []struct {
+		name     string
+		procName string
+		cmdLine  string
+		want     bool
+	}{
+		{
+			name:     "name match",
+			procName: "claude.exe",
+			cmdLine:  `"C:\Users\me\.claude-cli\2.1.92\claude.exe" --session-id 2c8d67fc-e59a-4a9e-af4d-2878b83ffe84`,
+			want:     true,
+		},
+		{
+			name:     "npm package marker match",
+			procName: "node.exe",
+			cmdLine:  `"C:\Program Files\nodejs\node.exe" D:\node_modules\node_modules\@anthropic-ai\claude-code\cli.js --session-id 2c8d67fc-e59a-4a9e-af4d-2878b83ffe84`,
+			want:     true,
+		},
+		{
+			name:     "powershell wrapper script",
+			procName: "pwsh.exe",
+			cmdLine:  `"C:\Users\me\AppData\Roaming\npm\claude.ps1" --session-id 2c8d67fc-e59a-4a9e-af4d-2878b83ffe84`,
+			want:     true,
+		},
+		{
+			name:     "non claude process",
+			procName: "node.exe",
+			cmdLine:  `node C:\scripts\my-script.js --session-id 2c8d67fc-e59a-4a9e-af4d-2878b83ffe84`,
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isClaudeCommand(tt.procName, tt.cmdLine)
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseNamedPipedLine(t *testing.T) {
 	line := `copilot.exe|23208|5678|2026-04-06T10:55:03.8656050-06:00|"C:\Users\user\AppData\Roaming\npm\copilot.cmd" --conversation-id conv_123`
 	info, procName, cmdLine, ok := parseNamedPipedLine(line, map[int]int{5678: 1000, 1000: 100})

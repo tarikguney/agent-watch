@@ -27,7 +27,7 @@ var copilotSessionIDRes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)conversationid(?:=|:|\s+)([0-9a-z._:-]+)`),
 }
 
-// ListClaude returns info for all running claude / claude.exe processes.
+// ListClaude returns info for running Claude CLI sessions.
 func ListClaude() ([]Info, error) {
 	switch runtime.GOOS {
 	case "windows":
@@ -49,12 +49,33 @@ func ListCopilot() ([]Info, error) {
 
 func listWindows() ([]Info, error) {
 	cmd := exec.Command("powershell", "-NoProfile", "-Command",
-		`Get-CimInstance Win32_Process -Filter "Name='claude.exe'" | ForEach-Object { "$($_.ProcessId)|$($_.ParentProcessId)|$($_.CreationDate.ToString('o'))|$($_.CommandLine)" }`)
+		`Get-CimInstance Win32_Process | ForEach-Object { "$($_.Name)|$($_.ProcessId)|$($_.ParentProcessId)|$($_.CreationDate.ToString('o'))|$($_.CommandLine)" }`)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("powershell process query failed: %w", err)
 	}
-	return parsePipedLinesWithCache(string(out), buildParentPIDMap())
+
+	cache := buildParentPIDMap()
+	var results []Info
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		info, procName, cmdLine, ok := parseNamedPipedLine(line, cache)
+		if !ok {
+			continue
+		}
+		if !isClaudeCommand(procName, cmdLine) {
+			continue
+		}
+		info.SessionID = extractFlag(sessionIDRe, cmdLine)
+		if info.SessionID == "" {
+			continue
+		}
+		results = append(results, info)
+	}
+	return results, nil
 }
 
 func listUnix() ([]Info, error) {
@@ -350,6 +371,26 @@ func isCopilotCommand(procName, cmdLine string) bool {
 	base := strings.ToLower(filepath.Base(extractCommandBinary(cmdLine)))
 	switch base {
 	case "copilot", "copilot.exe", "github-copilot-cli", "github-copilot-cli.exe":
+		return true
+	}
+	return false
+}
+
+func isClaudeCommand(procName, cmdLine string) bool {
+	name := strings.ToLower(strings.TrimSpace(procName))
+	switch name {
+	case "claude", "claude.exe":
+		return true
+	}
+
+	lower := strings.ToLower(cmdLine)
+	if strings.Contains(lower, "@anthropic-ai/claude-code") || strings.Contains(lower, "@anthropic-ai\\claude-code") {
+		return true
+	}
+
+	base := strings.ToLower(filepath.Base(extractCommandBinary(cmdLine)))
+	switch base {
+	case "claude", "claude.exe", "claude.ps1", "claude.cmd", "claude.bat":
 		return true
 	}
 	return false
