@@ -3,7 +3,7 @@ package process
 import (
 	"fmt"
 	"os/exec"
-	"path/filepath"
+	"path"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -368,7 +368,7 @@ func isCopilotCommand(procName, cmdLine string) bool {
 		return true
 	}
 
-	base := strings.ToLower(filepath.Base(extractCommandBinary(cmdLine)))
+	base := commandBinaryBase(cmdLine)
 	switch base {
 	case "copilot", "copilot.exe", "github-copilot-cli", "github-copilot-cli.exe":
 		return true
@@ -388,12 +388,21 @@ func isClaudeCommand(procName, cmdLine string) bool {
 		return true
 	}
 
-	base := strings.ToLower(filepath.Base(extractCommandBinary(cmdLine)))
+	base := commandBinaryBase(cmdLine)
 	switch base {
 	case "claude", "claude.exe", "claude.ps1", "claude.cmd", "claude.bat":
 		return true
 	}
 	return false
+}
+
+func commandBinaryBase(cmdLine string) string {
+	binary := extractCommandBinary(cmdLine)
+	if binary == "" {
+		return ""
+	}
+	// Normalize separators so Windows-style paths parse correctly on non-Windows runners.
+	return strings.ToLower(path.Base(strings.ReplaceAll(binary, `\`, `/`)))
 }
 
 func extractCommandBinary(cmdLine string) string {
