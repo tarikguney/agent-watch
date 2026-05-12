@@ -250,7 +250,7 @@ func TestRenderRow_NeverWraps(t *testing.T) {
 	// Exercise a range of terminal widths: narrow, typical, wide.
 	for _, termW := range []int{60, 80, 100, 140, 200} {
 		c := computeCols(sessions, now, termW)
-		row := renderRow(sessions[0], now, c, false)
+		row := renderRow(sessions[0], now, c, false, false)
 		if strings.Contains(row, "\n") {
 			t.Errorf("termW=%d: row contains newline; must be a single line. got:\n%q", termW, row)
 		}

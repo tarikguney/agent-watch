@@ -7,6 +7,7 @@ package ui
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -228,6 +229,9 @@ type Model struct {
 	notificationStates    map[string]session.Status
 	notificationLastSent  map[string]time.Time
 	notificationStartedAt time.Time
+	killConfirmPID        int
+	killConfirmLabel      string
+	killing               map[int]bool
 }
 
 // NewModel creates a new dashboard Model, pre-populated with the scanner's
@@ -256,6 +260,7 @@ func NewModel(
 		notificationStates:    snapshotNotificationStates(notificationSessionCandidates(scanner.Sessions())),
 		notificationLastSent:  make(map[string]time.Time),
 		notificationStartedAt: time.Now(),
+		killing:               make(map[int]bool),
 	}
 }
 
@@ -278,6 +283,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		visibleSessions := m.scanner.RunningSessions()
 		m.sessions = filterSessions(visibleSessions, m.providerFilter)
 		sortSessions(m.sessions)
+		if len(m.killing) > 0 {
+			alive := make(map[int]bool, len(m.sessions))
+			for _, s := range m.sessions {
+				alive[s.PID] = true
+			}
+			for pid := range m.killing {
+				if !alive[pid] {
+					delete(m.killing, pid)
+				}
+			}
+		}
 		count := len(m.sessions)
 		if count == 0 {
 			m.cursorIdx = 0
@@ -289,6 +305,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case tea.KeyMsg:
+		if m.killConfirmPID != 0 {
+			switch msg.String() {
+			case "y", "Y":
+				pid := m.killConfirmPID
+				label := m.killConfirmLabel
+				m.killConfirmPID = 0
+				m.killConfirmLabel = ""
+				if err := killProcess(pid); err != nil {
+					m.setStatusMessage(fmt.Sprintf("Failed to kill PID %d (%s): %v", pid, label, err), 5*time.Second)
+				} else {
+					if m.killing == nil {
+						m.killing = make(map[int]bool)
+					}
+					m.killing[pid] = true
+					m.setStatusMessage(fmt.Sprintf("Killing PID %d (%s)…", pid, label), 3*time.Second)
+				}
+			default:
+				m.killConfirmPID = 0
+				m.killConfirmLabel = ""
+				m.setStatusMessage("Kill cancelled", 2*time.Second)
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "up", "k":
 			if m.cursorIdx > 0 {
@@ -337,6 +376,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.statusMsg = fmt.Sprintf("Go to: %s  |  %s", s.TmuxSession, hint)
 					m.statusExp = time.Now().Add(5 * time.Second)
+				}
+			}
+		case "x", "X":
+			if m.cursorIdx < len(m.sessions) {
+				s := m.sessions[m.cursorIdx]
+				if s.PID <= 0 {
+					m.setStatusMessage("Selected row has no PID to kill", 3*time.Second)
+				} else if m.killing[s.PID] {
+					m.setStatusMessage(fmt.Sprintf("PID %d already being killed", s.PID), 2*time.Second)
+				} else {
+					m.killConfirmPID = s.PID
+					m.killConfirmLabel = displayProjectName(s)
 				}
 			}
 		case "q", "Q", "ctrl+c":
@@ -390,7 +441,7 @@ func (m Model) View() string {
 		isCursor := i == m.cursorIdx
 		isExpanded := m.expanded[s.PID]
 
-		b.WriteString(renderRow(s, now, c, isCursor) + "\n")
+		b.WriteString(renderRow(s, now, c, isCursor, m.killing[s.PID]) + "\n")
 
 		if !m.compact && isExpanded {
 			prompt := s.LastPrompt
@@ -427,7 +478,10 @@ func (m Model) View() string {
 	// Help bar or status message (mutually exclusive to keep line count stable)
 	if !m.compact {
 		b.WriteString("\n" + hline(tw) + "\n")
-		if m.statusMsg != "" && time.Now().Before(m.statusExp) {
+		if m.killConfirmPID != 0 {
+			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true) // red
+			b.WriteString(warnStyle.Render(fmt.Sprintf("  Kill PID %d (%s)? Press y to confirm, any other key to cancel.", m.killConfirmPID, m.killConfirmLabel)))
+		} else if m.statusMsg != "" && time.Now().Before(m.statusExp) {
 			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
 			b.WriteString(warnStyle.Render("  " + m.statusMsg))
 		} else {
@@ -439,6 +493,7 @@ func (m Model) View() string {
 					helpKeyStyle.Render("a/l/p") + helpTextStyle.Render(" Filter  ") +
 					helpKeyStyle.Render("e") + helpTextStyle.Render(" Expand All  ") +
 					helpKeyStyle.Render("c") + helpTextStyle.Render(" Collapse All  ") +
+					helpKeyStyle.Render("x") + helpTextStyle.Render(" Kill  ") +
 					helpKeyStyle.Render("q") + helpTextStyle.Render(" Quit"),
 			)
 		}
@@ -736,12 +791,15 @@ func Render(sessions []session.State, compact bool) string {
 	return m.View()
 }
 
-func renderRow(s session.State, now time.Time, c cols, isCursor bool) string {
+func renderRow(s session.State, now time.Time, c cols, isCursor, isKilling bool) string {
 	dur := ""
 	if !s.StartTime.IsZero() {
 		dur = session.FormatDuration(now.Sub(s.StartTime))
 	}
 	action := actionForStatus(s)
+	if isKilling {
+		action = "Killing…"
+	}
 	pidStr := ""
 	if s.PID > 0 {
 		pidStr = fmt.Sprintf("%d", s.PID)
@@ -760,7 +818,7 @@ func renderRow(s session.State, now time.Time, c cols, isCursor bool) string {
 		pidCell,
 		styledProvider(providerLabel(s), c.provider),
 		projectStyle.Width(c.project).Render(truncate(s.ProjectName, c.project)),
-		styledStatus(s.Status, c.status),
+		styledStatusCell(s.Status, c.status, isKilling),
 		actionStyle.Width(c.action).Render(truncate(action, c.action)),
 		durationStyle.Width(c.dur).Render(truncate(dur, c.dur)),
 	}
@@ -776,6 +834,15 @@ func renderRow(s session.State, now time.Time, c cols, isCursor bool) string {
 	}
 
 	return joinCols(cells)
+}
+
+var killingStatusStyle = lipgloss.NewStyle().Background(lipgloss.Color("9")).Foreground(lipgloss.Color("15")).Bold(true)
+
+func styledStatusCell(status session.Status, width int, isKilling bool) string {
+	if isKilling {
+		return killingStatusStyle.Width(width).Render(truncate("KILLING", width))
+	}
+	return styledStatus(status, width)
 }
 
 func styledStatus(status session.Status, width int) string {
@@ -905,6 +972,14 @@ func sortSessions(sessions []session.State) {
 		}
 		return sessions[i].PID < sessions[j].PID
 	})
+}
+
+func killProcess(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Kill()
 }
 
 func filterSessions(sessions []session.State, provider string) []session.State {
