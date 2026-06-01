@@ -218,6 +218,7 @@ type Model struct {
 	providerFilter        string
 	sessions              []session.State
 	cursorIdx             int
+	scrollOffset          int
 	expanded              map[int]bool
 	termW                 int
 	termH                 int
@@ -275,6 +276,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.termW = msg.Width
 		m.termH = msg.Height
+		m.scrollToCursor()
 
 	case tickMsg:
 		m.scanner.LoadAll()
@@ -300,6 +302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.cursorIdx >= count {
 			m.cursorIdx = count - 1
 		}
+		m.scrollToCursor()
 		return m, tea.Every(m.refresh, func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		})
@@ -393,14 +396,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "Q", "ctrl+c":
 			return m, tea.Quit
 		}
+		m.scrollToCursor()
 	}
 	return m, nil
 }
 
-func (m Model) View() string {
-	now := time.Now()
+// rowSpan is the half-open body line range [start, end) occupied by a session
+// entry (its row plus any expanded prompt/response lines), excluding the
+// trailing separator. Used to keep the selected row inside the scroll window.
+type rowSpan struct {
+	start, end int
+}
+
+// layout renders the dashboard into three stacked sections: a fixed top
+// (title + column header), a scrollable body (one entry per session), and a
+// fixed footer (help/status bar). spans[i] is the body line range for session i.
+func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpan) {
 	c := computeCols(m.sessions, now, m.termW)
-	var b strings.Builder
 
 	// Title line
 	title := titleStyle.Render("AGENT WATCH")
@@ -415,7 +427,6 @@ func (m Model) View() string {
 		}
 	}
 	titleParts = append(titleParts, timestamp)
-	b.WriteString(strings.Join(titleParts, " ") + "\n")
 
 	widths := []int{c.pid, c.provider, c.project, c.status, c.action, c.dur}
 	headers := []string{
@@ -433,15 +444,20 @@ func (m Model) View() string {
 		}, headers[1:]...)...)
 	}
 	tw := totalWidth(widths)
-	b.WriteString(hline(tw) + "\n")
-	b.WriteString(joinCols(headers) + "\n")
-	b.WriteString(hline(tw) + "\n")
+
+	top = []string{
+		strings.Join(titleParts, " "),
+		hline(tw),
+		joinCols(headers),
+		hline(tw),
+	}
 
 	for i, s := range m.sessions {
 		isCursor := i == m.cursorIdx
 		isExpanded := m.expanded[s.PID]
 
-		b.WriteString(renderRow(s, now, c, isCursor, m.killing[s.PID]) + "\n")
+		start := len(body)
+		body = append(body, renderRow(s, now, c, isCursor, m.killing[s.PID]))
 
 		if !m.compact && isExpanded {
 			prompt := s.LastPrompt
@@ -451,55 +467,136 @@ func (m Model) View() string {
 			if prompt != "" {
 				prefix := "  » prompt: "
 				maxLen := max(1, m.termW-len(prefix))
-				b.WriteString(
-					durationStyle.Render(prefix) +
-						promptStyle.Render(truncate(prompt, maxLen)) + "\n",
-				)
+				body = append(body,
+					durationStyle.Render(prefix)+promptStyle.Render(truncate(prompt, maxLen)))
 			}
 			if s.LastResponse != "" {
 				prefix := "  » response: "
 				maxLen := max(1, m.termW-len(prefix))
-				b.WriteString(
-					durationStyle.Render(prefix) +
-						responseStyle.Render(truncate(s.LastResponse, maxLen)) + "\n",
-				)
+				body = append(body,
+					durationStyle.Render(prefix)+responseStyle.Render(truncate(s.LastResponse, maxLen)))
 			}
 		}
 
+		spans = append(spans, rowSpan{start: start, end: len(body)})
+
 		if i < len(m.sessions)-1 {
-			b.WriteString(hline(tw) + "\n")
+			body = append(body, hline(tw))
 		}
 	}
 
 	if len(m.sessions) == 0 {
-		b.WriteString(durationStyle.Render("  No active sessions found. Watching for new sessions...") + "\n")
+		body = append(body, durationStyle.Render("  No active sessions found. Watching for new sessions..."))
 	}
 
 	// Help bar or status message (mutually exclusive to keep line count stable)
 	if !m.compact {
-		b.WriteString("\n" + hline(tw) + "\n")
+		footer = append(footer, "", hline(tw))
 		if m.killConfirmPID != 0 {
 			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true) // red
-			b.WriteString(warnStyle.Render(fmt.Sprintf("  Kill PID %d (%s)? Press y to confirm, any other key to cancel.", m.killConfirmPID, m.killConfirmLabel)))
+			footer = append(footer, warnStyle.Render(fmt.Sprintf("  Kill PID %d (%s)? Press y to confirm, any other key to cancel.", m.killConfirmPID, m.killConfirmLabel)))
 		} else if m.statusMsg != "" && time.Now().Before(m.statusExp) {
 			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
-			b.WriteString(warnStyle.Render("  " + m.statusMsg))
+			footer = append(footer, warnStyle.Render("  "+m.statusMsg))
 		} else {
-			b.WriteString(
-				helpKeyStyle.Render("↑↓") + helpTextStyle.Render(" Navigate  ") +
-					helpKeyStyle.Render("Enter") + helpTextStyle.Render(" Toggle  ") +
-					helpKeyStyle.Render("g") + helpTextStyle.Render(" Go to Window  ") +
-					m.notificationHelp() +
-					helpKeyStyle.Render("a/l/p") + helpTextStyle.Render(" Filter  ") +
-					helpKeyStyle.Render("e") + helpTextStyle.Render(" Expand All  ") +
-					helpKeyStyle.Render("c") + helpTextStyle.Render(" Collapse All  ") +
-					helpKeyStyle.Render("x") + helpTextStyle.Render(" Kill  ") +
-					helpKeyStyle.Render("q") + helpTextStyle.Render(" Quit"),
-			)
+			footer = append(footer,
+				helpKeyStyle.Render("↑↓")+helpTextStyle.Render(" Navigate  ")+
+					helpKeyStyle.Render("Enter")+helpTextStyle.Render(" Toggle  ")+
+					helpKeyStyle.Render("g")+helpTextStyle.Render(" Go to Window  ")+
+					m.notificationHelp()+
+					helpKeyStyle.Render("a/l/p")+helpTextStyle.Render(" Filter  ")+
+					helpKeyStyle.Render("e")+helpTextStyle.Render(" Expand All  ")+
+					helpKeyStyle.Render("c")+helpTextStyle.Render(" Collapse All  ")+
+					helpKeyStyle.Render("x")+helpTextStyle.Render(" Kill  ")+
+					helpKeyStyle.Render("q")+helpTextStyle.Render(" Quit"))
 		}
 	}
 
-	return b.String()
+	return top, body, footer, spans
+}
+
+// visibleRows is the number of body lines that fit between the fixed top and
+// footer sections for the current terminal height.
+func (m Model) visibleRows(topLines, footerLines int) int {
+	return max(1, m.termH-topLines-footerLines)
+}
+
+func (m Model) View() string {
+	top, body, footer, spans := m.layout(time.Now())
+	avail := m.visibleRows(len(top), len(footer))
+
+	offset := max(0, min(m.scrollOffset, len(body)-avail))
+	end := min(offset+avail, len(body))
+
+	// When the body overflows the window, annotate the title with the visible
+	// row range and arrows pointing to the off-screen content.
+	if len(body) > avail && len(top) > 0 {
+		top[0] += "  " + scrollIndicator(spans, offset, end, len(body))
+	}
+
+	lines := make([]string, 0, len(top)+(end-offset)+len(footer))
+	lines = append(lines, top...)
+	lines = append(lines, body[offset:end]...)
+	lines = append(lines, footer...)
+	return strings.Join(lines, "\n")
+}
+
+// scrollIndicator builds a compact "▲ first-last/total ▼" badge for the title
+// bar. Arrows are lit only in directions where content is hidden, and the range
+// reports which session rows are (partially) on screen.
+func scrollIndicator(spans []rowSpan, offset, end, total int) string {
+	up := " "
+	if offset > 0 {
+		up = "▲"
+	}
+	down := " "
+	if end < total {
+		down = "▼"
+	}
+
+	label := " more "
+	if len(spans) > 0 {
+		first, last := len(spans)-1, 0
+		for i, s := range spans {
+			if s.end > offset {
+				first = i
+				break
+			}
+		}
+		for i, s := range spans {
+			if s.start < end {
+				last = i
+			}
+		}
+		label = fmt.Sprintf(" %d-%d/%d ", first+1, last+1, len(spans))
+	}
+
+	return helpKeyStyle.Render(up) + durationStyle.Render(label) + helpKeyStyle.Render(down)
+}
+
+// scrollToCursor adjusts scrollOffset so the selected row stays inside the
+// visible window. The selection drags the scroll position with it; once the
+// cursor parks at an end, the offset is clamped to reveal the remaining
+// non-selectable content (down to the last body line, up to the first).
+func (m *Model) scrollToCursor() {
+	top, body, footer, spans := m.layout(time.Now())
+	avail := m.visibleRows(len(top), len(footer))
+
+	if m.cursorIdx >= 0 && m.cursorIdx < len(spans) {
+		s := spans[m.cursorIdx]
+		if s.start < m.scrollOffset {
+			m.scrollOffset = s.start
+		} else if s.end > m.scrollOffset+avail {
+			m.scrollOffset = s.end - avail
+		}
+	}
+
+	if maxOff := len(body) - avail; m.scrollOffset > maxOff {
+		m.scrollOffset = maxOff
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
 }
 
 func (m *Model) processNotifications(allSessions []session.State) {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tarikguney/agent-watch/internal/notify"
 	"github.com/tarikguney/agent-watch/internal/session"
 )
@@ -639,5 +640,155 @@ func TestProcessNotifications_CooldownSuppressesRapidDuplicate(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if notifier.count() != 0 {
 		t.Fatalf("expected cooldown to suppress notification, got %d", notifier.count())
+	}
+}
+
+// manySessions builds n single-line sessions with distinct project names
+// proj0..proj{n-1}, in stable order (no sort applied by the caller).
+func manySessions(n int) []session.State {
+	now := time.Now()
+	sessions := make([]session.State, n)
+	for i := range n {
+		sessions[i] = session.State{
+			Provider:    "claude",
+			ProjectName: "proj" + string(rune('0'+i)),
+			PID:         1000 + i,
+			Status:      session.StatusResponding,
+			StartTime:   now.Add(-time.Duration(i) * time.Minute),
+			LastUpdate:  now,
+		}
+	}
+	return sessions
+}
+
+func pressKey(m Model, t tea.KeyType) Model {
+	updated, _ := m.Update(tea.KeyMsg{Type: t})
+	return updated.(Model)
+}
+
+// TestView_ClampsToTerminalHeight verifies the rendered output never exceeds
+// the terminal height when content overflows the available space.
+func TestView_ClampsToTerminalHeight(t *testing.T) {
+	m := Model{
+		sessions:       manySessions(10),
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		killing:        make(map[int]bool),
+		termW:          120,
+		termH:          12,
+	}
+
+	lines := strings.Count(m.View(), "\n") + 1
+	if lines > m.termH {
+		t.Fatalf("View rendered %d lines, exceeds terminal height %d", lines, m.termH)
+	}
+}
+
+// TestView_ScrollFollowsCursorDown verifies that navigating down past the
+// visible window scrolls the overflowed content into view, and that the
+// previously-visible top rows scroll off.
+func TestView_ScrollFollowsCursorDown(t *testing.T) {
+	m := Model{
+		sessions:       manySessions(10),
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		killing:        make(map[int]bool),
+		termW:          120,
+		termH:          12,
+	}
+
+	// Last row is off-screen initially.
+	if strings.Contains(m.View(), "proj9") {
+		t.Fatal("expected last row 'proj9' to be off-screen before scrolling")
+	}
+
+	for range 9 {
+		m = pressKey(m, tea.KeyDown)
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "proj9") {
+		t.Fatalf("expected selected last row 'proj9' to be visible after scrolling, got:\n%s", out)
+	}
+	if strings.Contains(out, "proj0") {
+		t.Fatal("expected top row 'proj0' to have scrolled off-screen")
+	}
+	if m.scrollOffset == 0 {
+		t.Fatal("expected scrollOffset to advance past 0")
+	}
+}
+
+// TestView_ScrollReturnsToTop verifies that navigating back up brings the
+// first rows into view and resets the scroll offset.
+func TestView_ScrollReturnsToTop(t *testing.T) {
+	m := Model{
+		sessions:       manySessions(10),
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		killing:        make(map[int]bool),
+		termW:          120,
+		termH:          12,
+	}
+
+	for range 9 {
+		m = pressKey(m, tea.KeyDown)
+	}
+	for range 9 {
+		m = pressKey(m, tea.KeyUp)
+	}
+
+	if m.scrollOffset != 0 {
+		t.Fatalf("expected scrollOffset to return to 0 at top, got %d", m.scrollOffset)
+	}
+	if !strings.Contains(m.View(), "proj0") {
+		t.Fatal("expected first row 'proj0' to be visible after scrolling back up")
+	}
+}
+
+// TestView_ScrollIndicator verifies the title badge appears only when the body
+// overflows and reflects the scroll direction.
+func TestView_ScrollIndicator(t *testing.T) {
+	overflow := Model{
+		sessions:       manySessions(10),
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		killing:        make(map[int]bool),
+		termW:          120,
+		termH:          12,
+	}
+
+	// At the top: only the down arrow should be lit.
+	top := overflow.View()
+	if !strings.Contains(top, "▼") {
+		t.Error("expected down arrow when content is hidden below")
+	}
+	if strings.Contains(top, "▲") {
+		t.Error("did not expect up arrow at the top of the list")
+	}
+
+	// At the bottom: only the up arrow should be lit.
+	for range 9 {
+		overflow = pressKey(overflow, tea.KeyDown)
+	}
+	bottom := overflow.View()
+	if !strings.Contains(bottom, "▲") {
+		t.Error("expected up arrow when content is hidden above")
+	}
+	if strings.Contains(bottom, "▼") {
+		t.Error("did not expect down arrow at the bottom of the list")
+	}
+
+	// When everything fits, no indicator at all.
+	fits := Model{
+		sessions:       manySessions(2),
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		killing:        make(map[int]bool),
+		termW:          120,
+		termH:          40,
+	}
+	out := fits.View()
+	if strings.Contains(out, "▲") || strings.Contains(out, "▼") {
+		t.Error("did not expect a scroll indicator when all rows fit")
 	}
 }
