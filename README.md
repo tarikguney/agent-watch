@@ -30,6 +30,10 @@ sudo apt install golang-go
 sudo dnf install golang
 ```
 
+### psmux (required for prompt broadcasting)
+
+The **broadcasting** feature (sending one prompt to many agents at once) requires a tmux-compatible multiplexer. On Windows this is [**psmux**](https://github.com/psmux/psmux), which must be installed and on your `PATH`, with your agents running inside psmux panes. tmux and pmux are also supported. Monitoring works without a multiplexer; only broadcasting needs one.
+
 ## Installation
 
 ```bash
@@ -74,7 +78,7 @@ agent-watch --test-windows-notification
 | `Enter` | Toggle expansion for the selected session (show last prompt + response) |
 | `Space` | Mark / unmark the selected session for broadcasting |
 | `v` | Select or deselect all visible sessions |
-| `s` | Broadcast a prompt to the marked sessions (or the cursor row if none marked) |
+| `s` | Open the multiline broadcast dialog (`Ctrl+D` send, `Enter` newline, `Esc` cancel) |
 | `Esc` | Clear the broadcast selection |
 | `a` / `l` / `p` | Filter view to all / Claude / Copilot sessions |
 | `n` | Toggle Windows notifications on / off |
@@ -120,13 +124,15 @@ agent-watch detects tmux, psmux, and pmux automatically (set `CLAUDE_WATCH_TMUX_
 
 ## Broadcasting prompts
 
+> **Requires psmux** (or tmux/pmux) installed and on your `PATH`, with your agents running inside its panes. See [Prerequisites](#psmux-required-for-prompt-broadcasting).
+
 You can send the **same prompt to several running agents at once**, directly from the dashboard:
 
 1. Mark the sessions you want with `Space` (a gold `*` appears in the gutter and the title bar shows `[selected: N]`). Use `v` to mark or clear every visible row, and `Esc` to clear the selection.
-2. Press `s` to open the prompt box, type your prompt, and press `Enter` to send it (or `Esc` to cancel).
+2. Press `s` to open the prompt dialog. It's a multiline editor: type your prompt, press `Enter` for a new line, and press `Ctrl+D` to send (or `Esc` to cancel).
 3. If no rows are marked, the prompt is sent to the session under the cursor.
 
-The prompt is delivered by typing it into each agent's multiplexer pane and pressing Enter (via `send-keys`), so **broadcasting only works for sessions running inside tmux, psmux, or pmux**. Sessions that aren't in a multiplexer are skipped and reported in the status bar, e.g. `Sent to 3/5 agents  |  2 skipped: not in a multiplexer`.
+The prompt is delivered by typing it into each agent's multiplexer pane and submitting it (via `send-keys`), so **broadcasting only works for sessions running inside tmux, psmux, or pmux**. Sessions that aren't in a multiplexer are skipped and reported in the status bar, e.g. `Sent to 3/5 agents  |  2 skipped: not in a multiplexer`.
 
 ## Windows notifications
 

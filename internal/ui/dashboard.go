@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/tarikguney/agent-watch/internal/notify"
@@ -237,7 +237,7 @@ type Model struct {
 	killing               map[int]bool
 	marked                map[int]bool
 	composing             bool
-	promptInput           textinput.Model
+	promptInput           textarea.Model
 	selfSendTarget        string
 }
 
@@ -276,13 +276,17 @@ func NewModel(
 }
 
 // newPromptInput builds the single-line text input used to compose a broadcast
-// prompt. It is not focused until the user enters compose mode.
-func newPromptInput() textinput.Model {
-	ti := textinput.New()
-	ti.Placeholder = "Type a prompt to broadcast…"
-	ti.Prompt = ""
-	ti.CharLimit = 0
-	return ti
+// newPromptInput builds the multiline text area used to compose a broadcast
+// prompt. It is not focused until the user enters compose mode. Enter inserts a
+// newline; submission is handled by the compose-mode key router (Ctrl+D).
+func newPromptInput() textarea.Model {
+	ta := textarea.New()
+	ta.Placeholder = "Type a prompt to broadcast…  (Enter = newline)"
+	ta.Prompt = ""
+	ta.CharLimit = 0
+	ta.ShowLineNumbers = false
+	ta.SetHeight(6)
+	return ta
 }
 
 func (m Model) Init() tea.Cmd {
@@ -537,11 +541,9 @@ func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpa
 	if !m.compact {
 		footer = append(footer, "", hline(tw))
 		if m.composing {
-			label := lipgloss.NewStyle().Foreground(lipgloss.Color("#7DC4A3")).Bold(true).
-				Render(fmt.Sprintf("  Prompt → %d target(s): ", len(m.broadcastTargets())))
-			footer = append(footer, label+m.promptInput.View())
 			footer = append(footer,
-				helpKeyStyle.Render("  Enter")+helpTextStyle.Render(" Send  ")+
+				helpKeyStyle.Render("  Ctrl+D")+helpTextStyle.Render(" Send  ")+
+					helpKeyStyle.Render("Enter")+helpTextStyle.Render(" New line  ")+
 					helpKeyStyle.Render("Esc")+helpTextStyle.Render(" Cancel"))
 		} else if m.killConfirmPID != 0 {
 			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true) // red
@@ -592,7 +594,54 @@ func (m Model) View() string {
 	lines = append(lines, top...)
 	lines = append(lines, body[offset:end]...)
 	lines = append(lines, footer...)
-	return strings.Join(lines, "\n")
+	base := strings.Join(lines, "\n")
+
+	if m.composing {
+		return m.overlayComposeDialog(base)
+	}
+	return base
+}
+
+var (
+	dialogBorderStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#D4A0FF")).
+				Padding(0, 1)
+	dialogTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#D4A0FF"))
+	dialogHelpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+)
+
+// overlayComposeDialog renders the multiline broadcast prompt as a centered
+// modal box placed over the dashboard background.
+func (m Model) overlayComposeDialog(background string) string {
+	title := dialogTitleStyle.Render(
+		fmt.Sprintf("Broadcast prompt → %d target(s)", len(m.broadcastTargets())))
+	help := dialogHelpStyle.Render("Ctrl+D send   ·   Enter newline   ·   Esc cancel")
+
+	inner := lipgloss.JoinVertical(lipgloss.Left,
+		title,
+		"",
+		m.promptInput.View(),
+		"",
+		help,
+	)
+	dialog := dialogBorderStyle.Render(inner)
+
+	return placeOverlay(background, dialog, m.termW, m.termH)
+}
+
+// placeOverlay centers fg over a bg of the given dimensions. lipgloss.Place
+// composites the dialog onto a blank canvas sized to the terminal so the modal
+// appears centered; the underlying dashboard is replaced for the frame to keep
+// rendering simple and flicker-free.
+func placeOverlay(_ string, fg string, w, h int) string {
+	if w <= 0 {
+		w = 80
+	}
+	if h <= 0 {
+		h = 24
+	}
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, fg)
 }
 
 // scrollIndicator builds a compact "▲ first-last/total ▼" badge for the title
@@ -809,13 +858,33 @@ func (m Model) startComposing() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.composing = true
-	m.promptInput.SetValue("")
+	m.promptInput.Reset()
+	// Size the editor to a comfortable share of the terminal.
+	w := m.termW - 12
+	if w > 100 {
+		w = 100
+	}
+	if w < 20 {
+		w = 20
+	}
+	m.promptInput.SetWidth(w)
+	h := m.termH / 3
+	if h < 4 {
+		h = 4
+	}
+	if h > 12 {
+		h = 12
+	}
+	m.promptInput.SetHeight(h)
 	cmd := m.promptInput.Focus()
 	return m, cmd
 }
 
-// updateComposing routes key input to the prompt field while composing. Enter
-// broadcasts the prompt to the targets; Esc cancels without sending.
+// updateComposing routes key input to the prompt field while composing. Ctrl+D
+// broadcasts the prompt to the targets; Esc cancels without sending. Enter is
+// passed through to the text area as a newline (multiline input). Ctrl+D is used
+// for submit because Shift+Enter is not reliably distinguishable from Enter in a
+// terminal without an enhanced keyboard protocol.
 func (m Model) updateComposing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -823,7 +892,7 @@ func (m Model) updateComposing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.promptInput.Blur()
 		m.setStatusMessage("Broadcast cancelled", 2*time.Second)
 		return m, nil
-	case "enter":
+	case "ctrl+d":
 		prompt := strings.TrimSpace(m.promptInput.Value())
 		m.composing = false
 		m.promptInput.Blur()

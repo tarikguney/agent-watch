@@ -982,19 +982,33 @@ func TestCompose_NoTargetsRefuses(t *testing.T) {
 	}
 }
 
-// TestCompose_EmptyPromptSendsNothing verifies submitting an empty prompt does
-// not attempt a broadcast.
+// TestCompose_EmptyPromptSendsNothing verifies submitting (Ctrl+D) an empty
+// prompt does not attempt a broadcast.
 func TestCompose_EmptyPromptSendsNothing(t *testing.T) {
 	m := newBroadcastModel(2)
 	m = pressRune(m, 's')
 	if !m.composing {
 		t.Fatal("precondition: expected compose mode")
 	}
-	m = pressKey(m, tea.KeyEnter)
+	m = pressKey(m, tea.KeyCtrlD)
 	if m.composing {
-		t.Fatal("expected compose mode to exit on Enter")
+		t.Fatal("expected compose mode to exit on Ctrl+D")
 	}
 	if !strings.Contains(m.statusMsg, "Empty prompt") {
 		t.Fatalf("expected empty-prompt notice, got %q", m.statusMsg)
+	}
+}
+
+// TestCompose_EnterInsertsNewlineNotSend verifies Enter is a newline in the
+// multiline editor and does not submit/exit compose mode.
+func TestCompose_EnterInsertsNewlineNotSend(t *testing.T) {
+	m := newBroadcastModel(2)
+	m = pressRune(m, 's')
+	if !m.composing {
+		t.Fatal("precondition: expected compose mode")
+	}
+	m = pressKey(m, tea.KeyEnter)
+	if !m.composing {
+		t.Fatal("expected Enter to keep compose mode open (newline, not send)")
 	}
 }
