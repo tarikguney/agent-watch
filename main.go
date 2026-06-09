@@ -38,6 +38,7 @@ func main() {
 	var compact bool
 	var windowsNotifications bool
 	var testWindowsNotification bool
+	var printSessions bool
 
 	rootCmd := &cobra.Command{
 		Use:     "agent-watch",
@@ -51,6 +52,9 @@ complete or error.
 
 Source: https://github.com/tarikguney/agent-watch`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if printSessions {
+				return runPrintSessions(provider, claudeDir, copilotDir)
+			}
 			return run(
 				provider,
 				claudeDir,
@@ -79,6 +83,12 @@ Source: https://github.com/tarikguney/agent-watch`,
 		"test-windows-notification",
 		false,
 		"Send a sample Windows notification and exit (Windows only)",
+	)
+	rootCmd.Flags().BoolVar(
+		&printSessions,
+		"print-sessions",
+		false,
+		"Print discovered sessions with resolved tmux/psmux panes and exit (debug)",
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -164,6 +174,44 @@ func runWindowsNotificationTest(notifier notify.Notifier) error {
 		Title:   "agent-watch test notification",
 		Message: "Windows notifications are enabled for agent-watch.",
 	})
+}
+
+// runPrintSessions discovers sessions, resolves their panes, and prints a debug
+// table to stdout, then exits. It performs no send-keys and starts no UI.
+func runPrintSessions(provider, claudeDir, copilotDir string) error {
+	scanner, err := newScanner(provider, claudeDir, copilotDir)
+	if err != nil {
+		return err
+	}
+	if err := scanner.Discover(); err != nil {
+		return fmt.Errorf("discovery failed: %w", err)
+	}
+	scanner.LoadAll()
+	refreshProcesses(scanner)
+
+	selfTarget := tmux.SelfTarget()
+	fmt.Printf("agent-watch self send-target: %q (this pane is skipped on broadcast)\n", selfTarget)
+	fmt.Printf("%-8s %-8s %-22s %-26s %-8s %-18s %s\n", "PID", "PROVIDER", "PROJECT", "TMUX SESSION/WINDOW", "PANE", "SEND-TARGET", "SELF?")
+	for _, s := range scanner.RunningSessions() {
+		self := ""
+		if selfTarget != "" && s.TmuxSendTarget == selfTarget {
+			self = "<-- SELF"
+		}
+		fmt.Printf("%-8d %-8s %-22s %-26s %-8s %-18s %s\n",
+			s.PID, s.Provider, truncateStr(s.ProjectName, 22),
+			truncateStr(s.TmuxSession, 26), s.TmuxPaneID, s.TmuxSendTarget, self)
+	}
+	return nil
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	return s[:n-1] + "…"
 }
 
 func newScanner(provider, claudeDir, copilotDir string) (*session.Scanner, error) {

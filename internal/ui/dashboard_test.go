@@ -251,7 +251,7 @@ func TestRenderRow_NeverWraps(t *testing.T) {
 	// Exercise a range of terminal widths: narrow, typical, wide.
 	for _, termW := range []int{60, 80, 100, 140, 200} {
 		c := computeCols(sessions, now, termW)
-		row := renderRow(sessions[0], now, c, false, false)
+		row := renderRow(sessions[0], now, c, false, false, false)
 		if strings.Contains(row, "\n") {
 			t.Errorf("termW=%d: row contains newline; must be a single line. got:\n%q", termW, row)
 		}
@@ -666,6 +666,27 @@ func pressKey(m Model, t tea.KeyType) Model {
 	return updated.(Model)
 }
 
+// pressRune sends a single printable key (e.g. ' ', 'v', 's') to the model.
+func pressRune(m Model, r rune) Model {
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	return updated.(Model)
+}
+
+// newBroadcastModel builds a model with n marked-eligible sessions and the
+// maps/prompt input the broadcast feature relies on.
+func newBroadcastModel(n int) Model {
+	return Model{
+		sessions:       manySessions(n),
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		killing:        make(map[int]bool),
+		marked:         make(map[int]bool),
+		promptInput:    newPromptInput(),
+		termW:          120,
+		termH:          40,
+	}
+}
+
 // TestView_ClampsToTerminalHeight verifies the rendered output never exceeds
 // the terminal height when content overflows the available space.
 func TestView_ClampsToTerminalHeight(t *testing.T) {
@@ -790,5 +811,190 @@ func TestView_ScrollIndicator(t *testing.T) {
 	out := fits.View()
 	if strings.Contains(out, "▲") || strings.Contains(out, "▼") {
 		t.Error("did not expect a scroll indicator when all rows fit")
+	}
+}
+
+// TestMark_ToggleSingle verifies Space marks and unmarks the cursor row.
+func TestMark_ToggleSingle(t *testing.T) {
+	m := newBroadcastModel(3)
+
+	m = pressRune(m, ' ')
+	if !m.marked[1000] {
+		t.Fatalf("expected cursor row PID 1000 to be marked, marked=%v", m.marked)
+	}
+	m = pressRune(m, ' ')
+	if m.marked[1000] {
+		t.Fatalf("expected PID 1000 to be unmarked after second Space, marked=%v", m.marked)
+	}
+}
+
+// TestMark_SelectAllToggle verifies 'v' marks every eligible row, then clears.
+func TestMark_SelectAllToggle(t *testing.T) {
+	m := newBroadcastModel(3)
+
+	m = pressRune(m, 'v')
+	if len(m.marked) != 3 {
+		t.Fatalf("expected all 3 rows marked, got %d (%v)", len(m.marked), m.marked)
+	}
+	m = pressRune(m, 'v')
+	if len(m.marked) != 0 {
+		t.Fatalf("expected all marks cleared on second 'v', got %v", m.marked)
+	}
+}
+
+// TestMark_EscClears verifies Esc clears the selection.
+func TestMark_EscClears(t *testing.T) {
+	m := newBroadcastModel(3)
+	m = pressRune(m, 'v')
+	if len(m.marked) == 0 {
+		t.Fatal("precondition: expected rows marked")
+	}
+	m = pressKey(m, tea.KeyEsc)
+	if len(m.marked) != 0 {
+		t.Fatalf("expected Esc to clear marks, got %v", m.marked)
+	}
+}
+
+// TestBroadcastTargets_MarkedVsCursor verifies target selection prefers the
+// marked set and falls back to the cursor row when nothing is marked.
+func TestBroadcastTargets_MarkedVsCursor(t *testing.T) {
+	m := newBroadcastModel(3)
+
+	// No marks: target is the cursor row only.
+	if got := m.broadcastTargets(); len(got) != 1 || got[0].PID != 1000 {
+		t.Fatalf("expected cursor row 1000 as sole target, got %v", got)
+	}
+
+	// Mark two specific rows: targets are exactly those.
+	m.marked[1001] = true
+	m.marked[1002] = true
+	got := m.broadcastTargets()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 targets, got %d", len(got))
+	}
+	for _, s := range got {
+		if s.PID != 1001 && s.PID != 1002 {
+			t.Fatalf("unexpected target PID %d", s.PID)
+		}
+	}
+}
+
+// TestBroadcast_SkipsSessionsWithoutPane verifies sessions not in a multiplexer
+// are skipped (not sent) and reported in the status summary.
+func TestBroadcast_SkipsSessionsWithoutPane(t *testing.T) {
+	m := newBroadcastModel(2)
+	m.marked[1000] = true
+	m.marked[1001] = true
+
+	m.broadcast("hello agents")
+
+	if !strings.Contains(m.statusMsg, "Sent to 0/2") {
+		t.Fatalf("expected 'Sent to 0/2' summary, got %q", m.statusMsg)
+	}
+	if !strings.Contains(m.statusMsg, "2 skipped") {
+		t.Fatalf("expected '2 skipped' in summary, got %q", m.statusMsg)
+	}
+	// Nothing was sent, so the selection is preserved.
+	if len(m.marked) != 2 {
+		t.Fatalf("expected marks preserved when nothing sent, got %v", m.marked)
+	}
+}
+
+// TestBroadcast_SkipsSelfPane verifies agent-watch never types into its own
+// pane: a target whose qualified send-target matches the dashboard's is skipped.
+// Pane IDs collide across psmux sessions, so matching is by send-target.
+func TestBroadcast_SkipsSelfPane(t *testing.T) {
+	m := newBroadcastModel(2)
+	m.selfSendTarget = "agent-watch:1.0"
+	// Session 0 is the dashboard's own pane (same send-target).
+	m.sessions[0].TmuxSession = "agent-watch/coding"
+	m.sessions[0].TmuxPaneID = "%1"
+	m.sessions[0].TmuxSendTarget = "agent-watch:1.0"
+	// Session 1 shares the bare pane id %1 but is a different session: NOT self.
+	m.sessions[1].TmuxSession = "broker/master"
+	m.sessions[1].TmuxPaneID = "%1"
+	m.sessions[1].TmuxSendTarget = "broker:1.0"
+
+	m.marked[m.sessions[0].PID] = true
+	m.marked[m.sessions[1].PID] = true
+
+	m.broadcast("hi")
+
+	if !strings.Contains(m.statusMsg, "own pane") {
+		t.Fatalf("expected own-pane skip in summary, got %q", m.statusMsg)
+	}
+	if !m.isSelfPane(m.sessions[0]) {
+		t.Error("expected session 0 to be detected as self pane")
+	}
+	if m.isSelfPane(m.sessions[1]) {
+		t.Error("expected session 1 (different session, same pane id) NOT to be self")
+	}
+}
+
+// TestMark_SelectAllExcludesSelfPane verifies 'v' does not mark the dashboard's
+// own pane.
+func TestMark_SelectAllExcludesSelfPane(t *testing.T) {
+	m := newBroadcastModel(2)
+	m.selfSendTarget = "agent-watch:1.0"
+	m.sessions[0].TmuxSession = "agent-watch/coding"
+	m.sessions[0].TmuxPaneID = "%1"
+	m.sessions[0].TmuxSendTarget = "agent-watch:1.0"
+
+	m = pressRune(m, 'v')
+	if m.marked[m.sessions[0].PID] {
+		t.Error("expected self pane to be excluded from select-all")
+	}
+	if !m.marked[m.sessions[1].PID] {
+		t.Error("expected non-self session to be marked by select-all")
+	}
+}
+
+func TestCompose_StartAndCancel(t *testing.T) {
+	m := newBroadcastModel(3)
+
+	m = pressRune(m, 's')
+	if !m.composing {
+		t.Fatal("expected composing mode after pressing 's'")
+	}
+
+	m = pressKey(m, tea.KeyEsc)
+	if m.composing {
+		t.Fatal("expected Esc to cancel compose mode")
+	}
+}
+
+// TestCompose_NoTargetsRefuses verifies compose mode does not start with no
+// selectable sessions.
+func TestCompose_NoTargetsRefuses(t *testing.T) {
+	m := Model{
+		sessions:       nil,
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		killing:        make(map[int]bool),
+		marked:         make(map[int]bool),
+		promptInput:    newPromptInput(),
+		termW:          120,
+		termH:          40,
+	}
+	m = pressRune(m, 's')
+	if m.composing {
+		t.Fatal("expected compose mode to refuse to start with no targets")
+	}
+}
+
+// TestCompose_EmptyPromptSendsNothing verifies submitting an empty prompt does
+// not attempt a broadcast.
+func TestCompose_EmptyPromptSendsNothing(t *testing.T) {
+	m := newBroadcastModel(2)
+	m = pressRune(m, 's')
+	if !m.composing {
+		t.Fatal("precondition: expected compose mode")
+	}
+	m = pressKey(m, tea.KeyEnter)
+	if m.composing {
+		t.Fatal("expected compose mode to exit on Enter")
+	}
+	if !strings.Contains(m.statusMsg, "Empty prompt") {
+		t.Fatalf("expected empty-prompt notice, got %q", m.statusMsg)
 	}
 }

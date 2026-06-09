@@ -237,6 +237,7 @@ func (p *copilotProvider) MatchProcesses(sessions map[string]*State, procs []Pro
 		state.PID = 0
 		state.TmuxSession = ""
 		state.TmuxPaneID = ""
+		state.TmuxSendTarget = ""
 	}
 
 	for path, state := range sessions {
@@ -262,9 +263,10 @@ func (p *copilotProvider) MatchProcesses(sessions map[string]*State, procs []Pro
 				state.StartTime = proc.StartTime
 			}
 
-			tmuxSession, tmuxPaneID := tmux.Resolve(paneMap, proc.ParentPIDs)
+			tmuxSession, tmuxPaneID, tmuxSendTarget := tmux.Resolve(paneMap, proc.ParentPIDs)
 			state.TmuxSession = tmuxSession
 			state.TmuxPaneID = tmuxPaneID
+			state.TmuxSendTarget = tmuxSendTarget
 			break
 		}
 	}

@@ -15,9 +15,22 @@ import (
 // PaneInfo holds the tmux/psmux session and window name for a pane.
 type PaneInfo struct {
 	PanePID     int
-	PaneID      string // tmux pane unique ID, e.g. "%5"
+	PaneID      string // tmux pane unique ID, e.g. "%5" (NOT unique across psmux sessions)
 	SessionName string
 	WindowName  string
+	WindowIndex string // window index within the session, e.g. "3"
+	PaneIndex   string // pane index within the window, e.g. "0"
+}
+
+// SendTarget returns a fully-qualified "session:window.pane" target for use with
+// send-keys. psmux numbers panes per-session, so the bare PaneID ("%1") is
+// ambiguous across sessions; this index-qualified form routes unambiguously.
+// Returns "" if the index information is missing.
+func (p PaneInfo) SendTarget() string {
+	if p.SessionName == "" || p.WindowIndex == "" || p.PaneIndex == "" {
+		return ""
+	}
+	return p.SessionName + ":" + p.WindowIndex + "." + p.PaneIndex
 }
 
 // tmuxBin returns the first available tmux-compatible binary, or "" if none found.
@@ -37,6 +50,37 @@ func tmuxBin() string {
 // Available reports whether a tmux-compatible multiplexer is running.
 func Available() bool {
 	return tmuxBin() != ""
+}
+
+// SelfTarget returns the fully-qualified "session:window.pane" target of the
+// pane agent-watch is itself running in, or "" if it isn't inside a multiplexer.
+// This is used to avoid broadcasting a prompt into the dashboard's own terminal.
+//
+// It is read from psmux/tmux via display-message, which reports the calling
+// pane's own context (TMUX_PANE in the environment selects that pane).
+func SelfTarget() string {
+	bin := tmuxBin()
+	if bin == "" {
+		return ""
+	}
+	if strings.TrimSpace(os.Getenv("TMUX_PANE")) == "" {
+		return ""
+	}
+	out, err := exec.Command(bin, "display-message", "-p",
+		"#{session_name}:#{window_index}.#{pane_index}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// SessionOf returns the session component of a "session/window" or
+// "session:window.pane" target.
+func SessionOf(target string) string {
+	if idx := strings.IndexAny(target, "/:"); idx >= 0 {
+		return target[:idx]
+	}
+	return target
 }
 
 // ListPanes queries all panes across all tmux/psmux sessions.
@@ -91,7 +135,7 @@ func listSessionPanes(bin, sessionName string) []PaneInfo {
 	for _, winIdx := range windows {
 		target := sessionName + ":" + winIdx
 		cmd := exec.Command(bin, "list-panes", "-t", target,
-			"-F", "#{pane_pid} #{pane_id} #{session_name} #{window_name}")
+			"-F", "#{pane_pid} #{pane_id} #{pane_index} #{session_name} #{window_name}")
 		cmd.Env = envWithSession(sessionName)
 		out, err := cmd.Output()
 		if err != nil {
@@ -102,8 +146,9 @@ func listSessionPanes(bin, sessionName string) []PaneInfo {
 			if line == "" {
 				continue
 			}
-			parts := strings.SplitN(line, " ", 4)
-			if len(parts) < 4 {
+			// window_name may contain spaces, so it must come last.
+			parts := strings.SplitN(line, " ", 5)
+			if len(parts) < 5 {
 				continue
 			}
 			pid, err := strconv.Atoi(parts[0])
@@ -113,8 +158,10 @@ func listSessionPanes(bin, sessionName string) []PaneInfo {
 			panes = append(panes, PaneInfo{
 				PanePID:     pid,
 				PaneID:      parts[1],
-				SessionName: parts[2],
-				WindowName:  parts[3],
+				PaneIndex:   parts[2],
+				SessionName: parts[3],
+				WindowName:  parts[4],
+				WindowIndex: winIdx,
 			})
 		}
 	}
@@ -141,14 +188,15 @@ func listSessionWindows(bin, sessionName string) []string {
 
 // Resolve finds the tmux session/window for a process by walking its parent
 // PID chain and matching against pane PIDs.
-// Returns ("session/window", paneID) or ("", "") if no match.
-func Resolve(paneMap map[int]PaneInfo, parentPIDs []int) (string, string) {
+// Returns ("session/window", paneID, sendTarget) or ("","","") if no match.
+// sendTarget is the fully-qualified "session:window.pane" form for send-keys.
+func Resolve(paneMap map[int]PaneInfo, parentPIDs []int) (string, string, string) {
 	for _, ppid := range parentPIDs {
 		if info, ok := paneMap[ppid]; ok {
-			return info.SessionName + "/" + info.WindowName, info.PaneID
+			return info.SessionName + "/" + info.WindowName, info.PaneID, info.SendTarget()
 		}
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // SwitchToPane attempts to switch the current tmux/psmux client to the given
@@ -193,6 +241,44 @@ func SwitchToPane(target string, paneID string) error {
 		pCmd := exec.Command(bin, "select-pane", "-t", paneID)
 		pCmd.Env = envWithSession(targetSession)
 		_ = pCmd.Run()
+	}
+
+	return nil
+}
+
+// SendPrompt types a prompt into the given pane and submits it with Enter.
+// sendTarget must be a fully-qualified "session:window.pane" target — psmux
+// numbers panes per-session, so a bare pane ID ("%1") is ambiguous and can be
+// delivered to the wrong session. The text is sent literally (-l) so it is not
+// interpreted as key names, then a separate Enter key submits it.
+func SendPrompt(sendTarget string, prompt string) error {
+	bin := tmuxBin()
+	if bin == "" {
+		return fmt.Errorf("no tmux binary available")
+	}
+	if sendTarget == "" {
+		return fmt.Errorf("session has no resolved pane target")
+	}
+
+	// Route to the right psmux server using the session component of the target.
+	session := sendTarget
+	if idx := strings.IndexAny(sendTarget, ":"); idx >= 0 {
+		session = sendTarget[:idx]
+	}
+	env := envWithSession(session)
+
+	// 1. Type the prompt literally so special characters aren't parsed as keys.
+	typeCmd := exec.Command(bin, "send-keys", "-t", sendTarget, "-l", prompt)
+	typeCmd.Env = env
+	if out, err := typeCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("send-keys: %s", strings.TrimSpace(string(out)))
+	}
+
+	// 2. Submit with Enter (a key name, so sent without -l).
+	enterCmd := exec.Command(bin, "send-keys", "-t", sendTarget, "Enter")
+	enterCmd.Env = env
+	if out, err := enterCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("send-keys Enter: %s", strings.TrimSpace(string(out)))
 	}
 
 	return nil

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/tarikguney/agent-watch/internal/notify"
@@ -32,6 +33,7 @@ var (
 	durationStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	pidStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	cursorStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#D4A0FF")) // Bright arrow indicator
+	markStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD700")) // Gold selection marker
 	helpKeyStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6CB6FF")) // Soft blue for keys
 	helpTextStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))                // Gray for descriptions
 	providerStyles = map[string]lipgloss.Style{
@@ -233,6 +235,10 @@ type Model struct {
 	killConfirmPID        int
 	killConfirmLabel      string
 	killing               map[int]bool
+	marked                map[int]bool
+	composing             bool
+	promptInput           textinput.Model
+	selfSendTarget        string
 }
 
 // NewModel creates a new dashboard Model, pre-populated with the scanner's
@@ -246,7 +252,7 @@ func NewModel(
 ) Model {
 	sessions := scanner.RunningSessions()
 	sortSessions(sessions)
-	return Model{
+	m := Model{
 		scanner:               scanner,
 		compact:               compact,
 		refresh:               refresh,
@@ -262,7 +268,21 @@ func NewModel(
 		notificationLastSent:  make(map[string]time.Time),
 		notificationStartedAt: time.Now(),
 		killing:               make(map[int]bool),
+		marked:                make(map[int]bool),
+		promptInput:           newPromptInput(),
 	}
+	m.selfSendTarget = tmux.SelfTarget()
+	return m
+}
+
+// newPromptInput builds the single-line text input used to compose a broadcast
+// prompt. It is not focused until the user enters compose mode.
+func newPromptInput() textinput.Model {
+	ti := textinput.New()
+	ti.Placeholder = "Type a prompt to broadcast…"
+	ti.Prompt = ""
+	ti.CharLimit = 0
+	return ti
 }
 
 func (m Model) Init() tea.Cmd {
@@ -331,6 +351,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.composing {
+			return m.updateComposing(msg)
+		}
 		switch msg.String() {
 		case "up", "k":
 			if m.cursorIdx > 0 {
@@ -340,11 +363,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursorIdx < len(m.sessions)-1 {
 				m.cursorIdx++
 			}
-		case "enter", " ":
+		case "enter":
 			if m.cursorIdx < len(m.sessions) {
 				pid := m.sessions[m.cursorIdx].PID
 				m.expanded[pid] = !m.expanded[pid]
 			}
+		case " ":
+			if m.cursorIdx < len(m.sessions) {
+				s := m.sessions[m.cursorIdx]
+				if m.isSelfPane(s) {
+					m.setStatusMessage("Can't select agent-watch's own pane", 3*time.Second)
+				} else {
+					m.toggleMark(s.PID)
+				}
+			}
+		case "v", "V":
+			m.toggleMarkAll()
+		case "esc":
+			if len(m.marked) > 0 {
+				m.marked = make(map[int]bool)
+				m.setStatusMessage("Cleared selection", 2*time.Second)
+			}
+		case "s", "S":
+			return m.startComposing()
 		case "e":
 			for _, s := range m.sessions {
 				m.expanded[s.PID] = true
@@ -426,6 +467,9 @@ func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpa
 			titleParts = append(titleParts, durationStyle.Render(mutedTag))
 		}
 	}
+	if n := len(m.marked); n > 0 {
+		titleParts = append(titleParts, markStyle.Render(fmt.Sprintf("[selected: %d]", n)))
+	}
 	titleParts = append(titleParts, timestamp)
 
 	widths := []int{c.pid, c.provider, c.project, c.status, c.action, c.dur}
@@ -457,7 +501,7 @@ func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpa
 		isExpanded := m.expanded[s.PID]
 
 		start := len(body)
-		body = append(body, renderRow(s, now, c, isCursor, m.killing[s.PID]))
+		body = append(body, renderRow(s, now, c, isCursor, m.marked[s.PID], m.killing[s.PID]))
 
 		if !m.compact && isExpanded {
 			prompt := s.LastPrompt
@@ -492,7 +536,14 @@ func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpa
 	// Help bar or status message (mutually exclusive to keep line count stable)
 	if !m.compact {
 		footer = append(footer, "", hline(tw))
-		if m.killConfirmPID != 0 {
+		if m.composing {
+			label := lipgloss.NewStyle().Foreground(lipgloss.Color("#7DC4A3")).Bold(true).
+				Render(fmt.Sprintf("  Prompt → %d target(s): ", len(m.broadcastTargets())))
+			footer = append(footer, label+m.promptInput.View())
+			footer = append(footer,
+				helpKeyStyle.Render("  Enter")+helpTextStyle.Render(" Send  ")+
+					helpKeyStyle.Render("Esc")+helpTextStyle.Render(" Cancel"))
+		} else if m.killConfirmPID != 0 {
 			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true) // red
 			footer = append(footer, warnStyle.Render(fmt.Sprintf("  Kill PID %d (%s)? Press y to confirm, any other key to cancel.", m.killConfirmPID, m.killConfirmLabel)))
 		} else if m.statusMsg != "" && time.Now().Before(m.statusExp) {
@@ -502,6 +553,9 @@ func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpa
 			footer = append(footer,
 				helpKeyStyle.Render("↑↓")+helpTextStyle.Render(" Navigate  ")+
 					helpKeyStyle.Render("Enter")+helpTextStyle.Render(" Toggle  ")+
+					helpKeyStyle.Render("Space")+helpTextStyle.Render(" Select  ")+
+					helpKeyStyle.Render("v")+helpTextStyle.Render(" Select All  ")+
+					helpKeyStyle.Render("s")+helpTextStyle.Render(" Broadcast  ")+
 					helpKeyStyle.Render("g")+helpTextStyle.Render(" Go to Window  ")+
 					m.notificationHelp()+
 					helpKeyStyle.Render("a/l/p")+helpTextStyle.Render(" Filter  ")+
@@ -697,6 +751,163 @@ func (m *Model) setStatusMessage(msg string, duration time.Duration) {
 	m.statusExp = time.Now().Add(duration)
 }
 
+// toggleMark flips the broadcast selection for a session PID. PIDs <= 0 can't
+// be marked because they have no addressable process/pane.
+func (m *Model) toggleMark(pid int) {
+	if pid <= 0 {
+		m.setStatusMessage("Selected row has no PID to select", 2*time.Second)
+		return
+	}
+	if m.marked == nil {
+		m.marked = make(map[int]bool)
+	}
+	if m.marked[pid] {
+		delete(m.marked, pid)
+	} else {
+		m.marked[pid] = true
+	}
+}
+
+// toggleMarkAll marks every visible row, or clears all marks if every visible
+// row is already marked.
+func (m *Model) toggleMarkAll() {
+	if m.marked == nil {
+		m.marked = make(map[int]bool)
+	}
+	allMarked := true
+	eligible := 0
+	for _, s := range m.sessions {
+		if s.PID <= 0 || m.isSelfPane(s) {
+			continue
+		}
+		eligible++
+		if !m.marked[s.PID] {
+			allMarked = false
+		}
+	}
+	if eligible == 0 {
+		return
+	}
+	if allMarked {
+		m.marked = make(map[int]bool)
+		m.setStatusMessage("Cleared selection", 2*time.Second)
+		return
+	}
+	for _, s := range m.sessions {
+		if s.PID > 0 && !m.isSelfPane(s) {
+			m.marked[s.PID] = true
+		}
+	}
+	m.setStatusMessage(fmt.Sprintf("Selected %d sessions", eligible), 2*time.Second)
+}
+
+// startComposing enters prompt-compose mode. It refuses to start when there are
+// no targets (no marked rows and no row under the cursor).
+func (m Model) startComposing() (tea.Model, tea.Cmd) {
+	if len(m.broadcastTargets()) == 0 {
+		m.setStatusMessage("No session selected to prompt", 3*time.Second)
+		return m, nil
+	}
+	m.composing = true
+	m.promptInput.SetValue("")
+	cmd := m.promptInput.Focus()
+	return m, cmd
+}
+
+// updateComposing routes key input to the prompt field while composing. Enter
+// broadcasts the prompt to the targets; Esc cancels without sending.
+func (m Model) updateComposing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.composing = false
+		m.promptInput.Blur()
+		m.setStatusMessage("Broadcast cancelled", 2*time.Second)
+		return m, nil
+	case "enter":
+		prompt := strings.TrimSpace(m.promptInput.Value())
+		m.composing = false
+		m.promptInput.Blur()
+		if prompt == "" {
+			m.setStatusMessage("Empty prompt, nothing sent", 2*time.Second)
+			return m, nil
+		}
+		m.broadcast(prompt)
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.promptInput, cmd = m.promptInput.Update(msg)
+	return m, cmd
+}
+
+// broadcastTargets returns the sessions a prompt would be sent to: the marked
+// set, or the cursor row when nothing is marked.
+func (m Model) broadcastTargets() []session.State {
+	var targets []session.State
+	if len(m.marked) > 0 {
+		for _, s := range m.sessions {
+			if m.marked[s.PID] {
+				targets = append(targets, s)
+			}
+		}
+		return targets
+	}
+	if m.cursorIdx >= 0 && m.cursorIdx < len(m.sessions) {
+		targets = append(targets, m.sessions[m.cursorIdx])
+	}
+	return targets
+}
+
+// isSelfPane reports whether the session lives in the same pane agent-watch is
+// running in. Compared by the fully-qualified send target ("session:win.pane"),
+// which is unambiguous across psmux servers (unlike bare pane IDs).
+func (m Model) isSelfPane(s session.State) bool {
+	if m.selfSendTarget == "" || s.TmuxSendTarget == "" {
+		return false
+	}
+	return s.TmuxSendTarget == m.selfSendTarget
+}
+
+// broadcast sends prompt to every target that lives inside a multiplexer pane.
+// Targets without a resolved send target are skipped, as is agent-watch's own
+// pane (so the dashboard never types into itself). Results are summarized in the
+// status bar. Marks are cleared on a successful send.
+func (m *Model) broadcast(prompt string) {
+	targets := m.broadcastTargets()
+	total := len(targets)
+	sent, skipped, selfSkipped, failed := 0, 0, 0, 0
+	for _, s := range targets {
+		if m.isSelfPane(s) {
+			selfSkipped++
+			continue
+		}
+		if s.TmuxSendTarget == "" {
+			skipped++
+			continue
+		}
+		if err := tmux.SendPrompt(s.TmuxSendTarget, prompt); err != nil {
+			failed++
+			log.Printf("broadcast to %s (%s) failed: %v", s.TmuxSendTarget, displayProjectName(s), err)
+			continue
+		}
+		sent++
+	}
+
+	parts := []string{fmt.Sprintf("Sent to %d/%d agents", sent, total)}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped: not in a multiplexer", skipped))
+	}
+	if selfSkipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped: agent-watch's own pane", selfSkipped))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed (see log)", failed))
+	}
+	m.setStatusMessage(strings.Join(parts, "  |  "), 5*time.Second)
+	if sent > 0 {
+		m.marked = make(map[int]bool)
+	}
+}
+
 func (m Model) notificationHelp() string {
 	if m.notifier == nil {
 		return ""
@@ -888,7 +1099,7 @@ func Render(sessions []session.State, compact bool) string {
 	return m.View()
 }
 
-func renderRow(s session.State, now time.Time, c cols, isCursor, isKilling bool) string {
+func renderRow(s session.State, now time.Time, c cols, isCursor, isMarked, isKilling bool) string {
 	dur := ""
 	if !s.StartTime.IsZero() {
 		dur = session.FormatDuration(now.Sub(s.StartTime))
@@ -902,14 +1113,18 @@ func renderRow(s session.State, now time.Time, c cols, isCursor, isKilling bool)
 		pidStr = fmt.Sprintf("%d", s.PID)
 	}
 
-	// Cursor indicator occupies 2 chars (">" + " "); remaining width goes to PID value.
-	var pidCell string
+	// Two-char gutter precedes the PID value: a cursor caret and a mark glyph.
+	cursorCh := " "
 	if isCursor {
-		pidW := max(1, c.pid-2)
-		pidCell = cursorStyle.Render(">") + " " + pidStyle.Width(pidW).Render(truncate(pidStr, pidW))
-	} else {
-		pidCell = pidStyle.Width(c.pid).Render(truncate(pidStr, c.pid))
+		cursorCh = ">"
 	}
+	markCh := " "
+	if isMarked {
+		markCh = "*"
+	}
+	pidW := max(1, c.pid-2)
+	pidCell := cursorStyle.Render(cursorCh) + markStyle.Render(markCh) +
+		pidStyle.Width(pidW).Render(truncate(pidStr, pidW))
 
 	cells := []string{
 		pidCell,

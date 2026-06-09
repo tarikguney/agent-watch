@@ -320,10 +320,10 @@ func (p *claudeProvider) MatchProcesses(sessions map[string]*State, procs []Proc
 			}
 		}
 
-		tmuxSession, tmuxPaneID := tmux.Resolve(paneMap, proc.ParentPIDs)
+		tmuxSession, tmuxPaneID, tmuxSendTarget := tmux.Resolve(paneMap, proc.ParentPIDs)
 
 		if projectDir == "" {
-			createWaitingSession(sessions, proc, tmuxSession, tmuxPaneID)
+			createWaitingSession(sessions, proc, tmuxSession, tmuxPaneID, tmuxSendTarget)
 			continue
 		}
 
@@ -349,6 +349,7 @@ func (p *claudeProvider) MatchProcesses(sessions map[string]*State, procs []Proc
 			if tmuxSession != "" {
 				st.TmuxSession = tmuxSession
 				st.TmuxPaneID = tmuxPaneID
+				st.TmuxSendTarget = tmuxSendTarget
 			}
 			if st.StartTime.IsZero() && !proc.StartTime.IsZero() {
 				st.StartTime = proc.StartTime
@@ -358,7 +359,7 @@ func (p *claudeProvider) MatchProcesses(sessions map[string]*State, procs []Proc
 				st.ProjectName = filepath.Base(proc.Cwd)
 			}
 		} else {
-			createWaitingSession(sessions, proc, tmuxSession, tmuxPaneID)
+			createWaitingSession(sessions, proc, tmuxSession, tmuxPaneID, tmuxSendTarget)
 		}
 	}
 
@@ -401,22 +402,23 @@ func (p *claudeProvider) MatchProcesses(sessions map[string]*State, procs []Proc
 	}
 }
 
-func createWaitingSession(sessions map[string]*State, proc ProcessInfo, tmuxSession, tmuxPaneID string) {
+func createWaitingSession(sessions map[string]*State, proc ProcessInfo, tmuxSession, tmuxPaneID, tmuxSendTarget string) {
 	if proc.Cwd == "" {
 		return
 	}
 	sessions["placeholder:"+proc.SessionID] = &State{
-		SessionID:   proc.SessionID,
-		Provider:    "claude",
-		PID:         proc.PID,
-		Cwd:         proc.Cwd,
-		ProjectName: filepath.Base(proc.Cwd),
-		TmuxSession: tmuxSession,
-		TmuxPaneID:  tmuxPaneID,
-		Status:      StatusWaiting,
-		StartTime:   proc.StartTime,
-		LastUpdate:  time.Now(),
-		FileModTime: time.Now(),
+		SessionID:      proc.SessionID,
+		Provider:       "claude",
+		PID:            proc.PID,
+		Cwd:            proc.Cwd,
+		ProjectName:    filepath.Base(proc.Cwd),
+		TmuxSession:    tmuxSession,
+		TmuxPaneID:     tmuxPaneID,
+		TmuxSendTarget: tmuxSendTarget,
+		Status:         StatusWaiting,
+		StartTime:      proc.StartTime,
+		LastUpdate:     time.Now(),
+		FileModTime:    time.Now(),
 	}
 }
 
