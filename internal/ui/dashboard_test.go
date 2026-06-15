@@ -129,12 +129,12 @@ func TestRender_WithSessions(t *testing.T) {
 	}
 }
 
-func TestRender_SortOrder_ByProviderThenPID(t *testing.T) {
+func TestRender_SortOrder_DefaultProjectAscending(t *testing.T) {
 	now := time.Now()
 	sessions := []session.State{
 		{
 			Provider:    "copilot",
-			ProjectName: "copilot-low",
+			ProjectName: "zeta",
 			PID:         100,
 			Status:      session.StatusIdle,
 			LastUpdate:  now,
@@ -142,7 +142,7 @@ func TestRender_SortOrder_ByProviderThenPID(t *testing.T) {
 		},
 		{
 			Provider:    "claude",
-			ProjectName: "claude-high",
+			ProjectName: "alpha",
 			PID:         300,
 			Status:      session.StatusResponding,
 			LastUpdate:  now,
@@ -150,7 +150,7 @@ func TestRender_SortOrder_ByProviderThenPID(t *testing.T) {
 		},
 		{
 			Provider:    "claude",
-			ProjectName: "claude-low",
+			ProjectName: "mid",
 			PID:         200,
 			Status:      session.StatusDone,
 			LastUpdate:  now,
@@ -160,12 +160,12 @@ func TestRender_SortOrder_ByProviderThenPID(t *testing.T) {
 
 	output := Render(sessions, false)
 
-	claudeLowIdx := strings.Index(output, "claude-low")
-	claudeHighIdx := strings.Index(output, "claude-high")
-	copilotLowIdx := strings.Index(output, "copilot-low")
+	alphaIdx := strings.Index(output, "alpha")
+	midIdx := strings.Index(output, "mid")
+	zetaIdx := strings.Index(output, "zeta")
 
-	if claudeLowIdx > claudeHighIdx || claudeHighIdx > copilotLowIdx {
-		t.Error("sessions should be sorted by provider first, then PID")
+	if alphaIdx > midIdx || midIdx > zetaIdx {
+		t.Error("sessions should default to project ascending order")
 	}
 }
 
@@ -195,25 +195,28 @@ func TestRender_Compact(t *testing.T) {
 	}
 }
 
-func TestRender_SortOrder(t *testing.T) {
+func TestSortSessions_ProjectTieBreakers(t *testing.T) {
 	now := time.Now()
 	sessions := []session.State{
 		{
-			ProjectName: "high-pid",
+			Provider:    "copilot",
+			ProjectName: "same-project",
 			PID:         300,
 			Status:      session.StatusResponding,
 			LastUpdate:  now,
 			StartTime:   now.Add(-5 * time.Minute),
 		},
 		{
-			ProjectName: "low-pid",
+			Provider:    "claude",
+			ProjectName: "same-project",
 			PID:         100,
 			Status:      session.StatusIdle,
 			LastUpdate:  now,
 			StartTime:   now.Add(-10 * time.Minute),
 		},
 		{
-			ProjectName: "mid-pid",
+			Provider:    "claude",
+			ProjectName: "same-project",
 			PID:         200,
 			Status:      session.StatusDone,
 			LastUpdate:  now,
@@ -221,14 +224,41 @@ func TestRender_SortOrder(t *testing.T) {
 		},
 	}
 
-	output := Render(sessions, false)
+	sortSessions(sessions, sortModeProject)
 
-	lowIdx := strings.Index(output, "low-pid")
-	midIdx := strings.Index(output, "mid-pid")
-	highIdx := strings.Index(output, "high-pid")
+	if sessions[0].PID != 100 || sessions[1].PID != 200 || sessions[2].PID != 300 {
+		t.Fatalf("rows with same project should sort by provider, then PID: %#v", sessions)
+	}
+}
 
-	if lowIdx > midIdx || midIdx > highIdx {
-		t.Error("sessions should be sorted by PID ascending")
+func TestSortSessions_RecentActivity(t *testing.T) {
+	now := time.Now()
+	sessions := []session.State{
+		{
+			ProjectName: "older",
+			PID:         100,
+			LastUpdate:  now.Add(-30 * time.Minute),
+			Status:      session.StatusIdle,
+		},
+		{
+			ProjectName: "middle",
+			PID:         200,
+			LastUpdate:  now.Add(-10 * time.Minute),
+			Status:      session.StatusIdle,
+		},
+		{
+			ProjectName: "recent-done",
+			PID:         300,
+			LastUpdate:  now.Add(-1 * time.Hour),
+			CompletedAt: now.Add(-2 * time.Minute),
+			Status:      session.StatusCompletedAgo,
+		},
+	}
+
+	sortSessions(sessions, sortModeRecent)
+
+	if sessions[0].ProjectName != "recent-done" || sessions[1].ProjectName != "middle" || sessions[2].ProjectName != "older" {
+		t.Fatalf("unexpected recent sort order: %#v", sessions)
 	}
 }
 
@@ -866,6 +896,36 @@ func TestView_ScrollIndicator(t *testing.T) {
 	out := fits.View()
 	if strings.Contains(out, "▲") || strings.Contains(out, "▼") {
 		t.Error("did not expect a scroll indicator when all rows fit")
+	}
+}
+
+func TestUpdate_ToggleSortMode(t *testing.T) {
+	now := time.Now()
+	m := Model{
+		sessions: []session.State{
+			{ProjectName: "beta", PID: 100, LastUpdate: now.Add(-5 * time.Minute), Status: session.StatusIdle},
+			{ProjectName: "alpha", PID: 200, LastUpdate: now.Add(-2 * time.Minute), Status: session.StatusIdle},
+			{ProjectName: "gamma", PID: 300, LastUpdate: now.Add(-1 * time.Minute), Status: session.StatusCompletedAgo, CompletedAt: now.Add(-30 * time.Second)},
+		},
+		sortMode:       sortModeProject,
+		providerFilter: "all",
+		expanded:       make(map[int]bool),
+		killing:        make(map[int]bool),
+		marked:         make(map[int]bool),
+		termW:          120,
+		termH:          40,
+	}
+	sortSessions(m.sessions, m.sortMode)
+	if got := m.sessions[0].ProjectName; got != "alpha" {
+		t.Fatalf("expected default project sort, got first project %q", got)
+	}
+
+	m = pressRune(m, 'r')
+	if m.sortMode != sortModeRecent {
+		t.Fatalf("expected sort mode to switch to recent, got %q", m.sortMode)
+	}
+	if got := m.sessions[0].ProjectName; got != "gamma" {
+		t.Fatalf("expected most recent activity first after toggle, got %q", got)
 	}
 }
 

@@ -83,6 +83,7 @@ agent-watch --test-windows-notification
 | `a` / `l` / `p` | Filter view to all / Claude / Copilot sessions |
 | `n` | Toggle Windows notifications on / off |
 | `m` | Mute or unmute Windows notifications for the selected row for the current run |
+| `r` | Toggle sort mode: project (A-Z, default) / recent activity |
 | `e` | Expand all rows |
 | `c` | Collapse all rows |
 | `g` | Go to the session's tmux/psmux window (jumps the active client) |

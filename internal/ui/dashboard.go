@@ -220,12 +220,20 @@ func truncate(s string, maxWidth int) string {
 
 type tickMsg time.Time
 
+type sortMode string
+
+const (
+	sortModeProject sortMode = "project"
+	sortModeRecent  sortMode = "recent"
+)
+
 // Model is the Bubbletea model for the agent-watch dashboard.
 type Model struct {
 	scanner               *session.Scanner
 	compact               bool
 	refresh               time.Duration
 	providerFilter        string
+	sortMode              sortMode
 	sessions              []session.State
 	cursorIdx             int
 	scrollOffset          int
@@ -259,12 +267,13 @@ func NewModel(
 	notificationsEnabled bool,
 ) Model {
 	sessions := scanner.RunningSessions()
-	sortSessions(sessions)
+	sortSessions(sessions, sortModeProject)
 	m := Model{
 		scanner:               scanner,
 		compact:               compact,
 		refresh:               refresh,
 		providerFilter:        "all",
+		sortMode:              sortModeProject,
 		sessions:              sessions,
 		expanded:              make(map[int]bool),
 		termW:                 120,
@@ -316,7 +325,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.processNotifications(notificationSessionCandidates(allSessions))
 		visibleSessions := m.scanner.RunningSessions()
 		m.sessions = filterSessions(visibleSessions, m.providerFilter)
-		sortSessions(m.sessions)
+		sortSessions(m.sessions, m.sortMode)
 		if len(m.killing) > 0 {
 			alive := make(map[int]bool, len(m.sessions))
 			for _, s := range m.sessions {
@@ -414,6 +423,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toggleNotifications()
 		case "p", "P":
 			m.providerFilter = "copilot"
+		case "r", "R":
+			m.toggleSortMode()
+			sortSessions(m.sessions, m.sortMode)
 		case "g", "G":
 			if m.cursorIdx < len(m.sessions) {
 				s := m.sessions[m.cursorIdx]
@@ -472,7 +484,8 @@ func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpa
 	subtitle := durationStyle.Render("— monitoring agent sessions")
 	timestamp := durationStyle.Render(now.Format("01/02 15:04:05"))
 	filterTag := durationStyle.Render(fmt.Sprintf("[filter: %s]", strings.ToUpper(m.providerFilter)))
-	titleParts := []string{title, subtitle, filterTag}
+	sortTag := durationStyle.Render(fmt.Sprintf("[sort: %s]", m.sortMode.label()))
+	titleParts := []string{title, subtitle, filterTag, sortTag}
 	if m.notifier != nil {
 		titleParts = append(titleParts, durationStyle.Render(m.notificationTag()))
 		if mutedTag := m.selectedMutedTag(); mutedTag != "" {
@@ -569,6 +582,7 @@ func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpa
 					helpKeyStyle.Render("g")+helpTextStyle.Render(" Go to Window  ")+
 					m.notificationHelp()+
 					helpKeyStyle.Render("a/l/p")+helpTextStyle.Render(" Filter  ")+
+					helpKeyStyle.Render("r")+helpTextStyle.Render(" Sort  ")+
 					helpKeyStyle.Render("e")+helpTextStyle.Render(" Expand All  ")+
 					helpKeyStyle.Render("c")+helpTextStyle.Render(" Collapse All  ")+
 					helpKeyStyle.Render("x")+helpTextStyle.Render(" Kill  ")+
@@ -1169,11 +1183,12 @@ func Render(sessions []session.State, compact bool) string {
 		sessions:       sessions,
 		compact:        compact,
 		providerFilter: "all",
+		sortMode:       sortModeProject,
 		expanded:       make(map[int]bool),
 		termW:          120,
 		termH:          40,
 	}
-	sortSessions(m.sessions)
+	sortSessions(m.sessions, m.sortMode)
 	return m.View()
 }
 
@@ -1377,8 +1392,42 @@ func providerRank(s session.State) int {
 	}
 }
 
-func sortSessions(sessions []session.State) {
+func (m *Model) toggleSortMode() {
+	switch m.sortMode {
+	case sortModeRecent:
+		m.sortMode = sortModeProject
+		m.setStatusMessage("Sort: project (A-Z)", 2*time.Second)
+	default:
+		m.sortMode = sortModeRecent
+		m.setStatusMessage("Sort: recent activity", 2*time.Second)
+	}
+}
+
+func (sm sortMode) label() string {
+	switch sm {
+	case sortModeRecent:
+		return "recent"
+	default:
+		return "project"
+	}
+}
+
+func sortSessions(sessions []session.State, mode sortMode) {
 	sort.Slice(sessions, func(i, j int) bool {
+		if mode == sortModeRecent {
+			ti := activityTimestamp(sessions[i])
+			tj := activityTimestamp(sessions[j])
+			if !ti.Equal(tj) {
+				return ti.After(tj)
+			}
+		}
+
+		pi := strings.ToLower(displayProjectName(sessions[i]))
+		pj := strings.ToLower(displayProjectName(sessions[j]))
+		if pi != pj {
+			return pi < pj
+		}
+
 		ri := providerRank(sessions[i])
 		rj := providerRank(sessions[j])
 		if ri != rj {
@@ -1386,6 +1435,19 @@ func sortSessions(sessions []session.State) {
 		}
 		return sessions[i].PID < sessions[j].PID
 	})
+}
+
+func activityTimestamp(s session.State) time.Time {
+	if !s.CompletedAt.IsZero() {
+		return s.CompletedAt
+	}
+	if !s.LastUpdate.IsZero() {
+		return s.LastUpdate
+	}
+	if !s.FileModTime.IsZero() {
+		return s.FileModTime
+	}
+	return s.StartTime
 }
 
 func killProcess(pid int) error {
