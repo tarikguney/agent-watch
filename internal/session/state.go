@@ -17,15 +17,16 @@ import (
 type Status string
 
 const (
-	StatusThinking    Status = "Thinking"
-	StatusToolUse     Status = "Tool Use"
-	StatusStreaming   Status = "Streaming"
-	StatusResponding  Status = "Responding"
-	StatusIdle        Status = "Idle"
-	StatusDone        Status = "Done"
-	StatusError       Status = "Error"
-	StatusInterrupted Status = "Interrupted"
-	StatusWaiting     Status = "Waiting"
+	StatusThinking     Status = "Thinking"
+	StatusToolUse      Status = "Tool Use"
+	StatusStreaming    Status = "Streaming"
+	StatusResponding   Status = "Responding"
+	StatusCompletedAgo Status = "Completed"
+	StatusIdle         Status = "Idle"
+	StatusDone         Status = "Done"
+	StatusError        Status = "Error"
+	StatusInterrupted  Status = "Interrupted"
+	StatusWaiting      Status = "Waiting"
 )
 
 // State holds the derived state for a single Claude Code session.
@@ -44,6 +45,7 @@ type State struct {
 	LastResponse   string
 	CurrentAction  string
 	Status         Status
+	CompletedAt    time.Time
 	Model          string
 	StartTime      time.Time
 	LastUpdate     time.Time
@@ -69,6 +71,80 @@ const idleThreshold = 5 * time.Minute
 
 // activeThreshold is the max age of the last record to still be considered Responding.
 const activeThreshold = 2 * time.Minute
+
+// completedAgoThreshold is how long "Completed X ago" is shown before reverting to Idle.
+const completedAgoThreshold = 8 * time.Hour
+
+// IsActiveWorkStatus returns true when the agent is actively working on a turn.
+func IsActiveWorkStatus(status Status) bool {
+	return status == StatusThinking ||
+		status == StatusToolUse ||
+		status == StatusStreaming ||
+		status == StatusResponding
+}
+
+// ParseStatusTimestamp parses an RFC3339Nano timestamp and returns zero on failure.
+func ParseStatusTimestamp(ts string) time.Time {
+	if ts == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
+// ApplyCompletedAgoStatus converts terminal Idle/Done states to the transient
+// Completed status after active work and preserves it until new work starts.
+func ApplyCompletedAgoStatus(previous, current Status, existingCompletedAt, completionTime, now time.Time) (Status, time.Time) {
+	if IsActiveWorkStatus(current) || current == StatusError || current == StatusInterrupted || current == StatusWaiting {
+		return current, time.Time{}
+	}
+
+	if current == StatusCompletedAgo {
+		if !existingCompletedAt.IsZero() {
+			if completedAgoExpired(existingCompletedAt, now) {
+				return StatusIdle, time.Time{}
+			}
+			return current, existingCompletedAt
+		}
+		if completionTime.IsZero() {
+			completionTime = now
+		}
+		if completedAgoExpired(completionTime, now) {
+			return StatusIdle, time.Time{}
+		}
+		return current, completionTime
+	}
+
+	if current == StatusIdle || current == StatusDone {
+		if IsActiveWorkStatus(previous) {
+			if completionTime.IsZero() {
+				completionTime = now
+			}
+			if completedAgoExpired(completionTime, now) {
+				return StatusIdle, time.Time{}
+			}
+			return StatusCompletedAgo, completionTime
+		}
+		if previous == StatusCompletedAgo && !existingCompletedAt.IsZero() {
+			if completedAgoExpired(existingCompletedAt, now) {
+				return StatusIdle, time.Time{}
+			}
+			return StatusCompletedAgo, existingCompletedAt
+		}
+	}
+
+	return current, time.Time{}
+}
+
+func completedAgoExpired(completedAt, now time.Time) bool {
+	if completedAt.IsZero() {
+		return false
+	}
+	return now.Sub(completedAt) >= completedAgoThreshold
+}
 
 // DeriveStatus computes the session status from the last record and its timestamp.
 // processRunning indicates whether the session has a live OS process (PID > 0).

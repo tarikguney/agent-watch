@@ -18,6 +18,8 @@ func applyCopilotEvent(state *State, event parser.CopilotEvent, processRunning b
 	if state == nil {
 		return
 	}
+	previousStatus := state.Status
+	previousCompletedAt := state.CompletedAt
 
 	state.LastRecordType = event.Type
 	state.LastRecordSubtype = ""
@@ -152,6 +154,14 @@ func applyCopilotEvent(state *State, event parser.CopilotEvent, processRunning b
 	default:
 		state.Status = deriveCopilotStatus(*state, processRunning, now)
 	}
+
+	state.Status, state.CompletedAt = ApplyCompletedAgoStatus(
+		previousStatus,
+		state.Status,
+		previousCompletedAt,
+		state.LastUpdate,
+		now,
+	)
 }
 
 func deriveCopilotStatus(state State, processRunning bool, now time.Time) Status {

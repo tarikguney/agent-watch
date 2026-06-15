@@ -276,7 +276,11 @@ func (p *copilotProvider) MatchProcesses(sessions map[string]*State, procs []Pro
 		if state.LastRecordType == "" {
 			continue
 		}
+		prevStatus := state.Status
+		prevCompletedAt := state.CompletedAt
 		state.Status = deriveCopilotStatus(*state, state.PID > 0, now)
+		completionTime := ParseStatusTimestamp(state.LastRecordTimestamp)
+		state.Status, state.CompletedAt = ApplyCompletedAgoStatus(prevStatus, state.Status, prevCompletedAt, completionTime, now)
 	}
 }
 

@@ -64,6 +64,8 @@ func (p *claudeProvider) LoadSession(path string, current State) (State, error) 
 	state.FilePath = path
 	state.Provider = "claude"
 	processRunning := state.PID > 0
+	prevStatus := state.Status
+	prevCompletedAt := state.CompletedAt
 
 	headRecords, err := parser.ReadHead(path)
 	if err != nil {
@@ -105,6 +107,8 @@ func (p *claudeProvider) LoadSession(path string, current State) (State, error) 
 	if len(tailRecords) > 0 {
 		status = DeriveStatus(lastRec, isError, now, processRunning)
 	}
+	completionTime := ParseStatusTimestamp(lastRec.Timestamp)
+	status, completedAt := ApplyCompletedAgoStatus(prevStatus, status, prevCompletedAt, completionTime, now)
 
 	var startTime time.Time
 	for _, rec := range headRecords {
@@ -126,6 +130,7 @@ func (p *claudeProvider) LoadSession(path string, current State) (State, error) 
 	state.LastResponse = lastResponse
 	state.CurrentAction = action
 	state.Status = status
+	state.CompletedAt = completedAt
 	state.Model = model
 	state.StartTime = startTime
 	state.LastUpdate = now
@@ -155,6 +160,7 @@ func (p *claudeProvider) UpdateSession(path string, current State) (State, error
 	offset := state.FileOffset
 	processRunning := state.PID > 0
 	prevStatus := state.Status
+	prevCompletedAt := state.CompletedAt
 
 	newRecords, newOffset, err := parser.ReadNewBytes(path, offset)
 	if err != nil {
@@ -191,6 +197,8 @@ func (p *claudeProvider) UpdateSession(path string, current State) (State, error
 	} else {
 		status = prevStatus
 	}
+	completionTime := ParseStatusTimestamp(lastRec.Timestamp)
+	status, completedAt := ApplyCompletedAgoStatus(prevStatus, status, prevCompletedAt, completionTime, now)
 
 	newCwd := ""
 	for _, rec := range newRecords {
@@ -204,6 +212,7 @@ func (p *claudeProvider) UpdateSession(path string, current State) (State, error
 	state.LastUpdate = now
 	state.FileModTime = now
 	state.Status = status
+	state.CompletedAt = completedAt
 	if hasRelevant {
 		state.LastRecordType = lastRec.Type
 		state.LastRecordSubtype = lastRec.Subtype
@@ -367,38 +376,37 @@ func (p *claudeProvider) MatchProcesses(sessions map[string]*State, procs []Proc
 		if state.PID <= 0 || state.LastRecordType == "" {
 			continue
 		}
-		if state.Status == StatusDone {
-			continue
-		}
+		prevStatus := state.Status
+		prevCompletedAt := state.CompletedAt
 		if state.LastToolResultError {
 			state.Status = StatusError
-			continue
-		}
-		if state.LastRecordType == "system" && state.LastRecordSubtype == "turn_duration" {
+		} else if state.LastRecordType == "system" && state.LastRecordSubtype == "turn_duration" {
 			state.Status = StatusIdle
-			continue
-		}
-		switch state.LastRecordType {
-		case "attachment":
-			state.Status = StatusThinking
-		case "assistant":
-			state.Status = rederiveAssistantStatus(state.LastStopReason, state.LastBlockTypes, state.LastAssistantIsWorking)
-		case "user":
-			if state.LastIsInterrupt {
-				state.Status = StatusInterrupted
-			} else if state.LastHasToolResult {
-				state.Status = StatusResponding
-			} else if state.LastIsSystemInjectedUser {
-				state.Status = StatusIdle
-			} else {
-				recTime, err := time.Parse(time.RFC3339Nano, state.LastRecordTimestamp)
-				if err == nil && time.Since(recTime) < activeThreshold {
-					state.Status = StatusThinking
-				} else {
+		} else {
+			switch state.LastRecordType {
+			case "attachment":
+				state.Status = StatusThinking
+			case "assistant":
+				state.Status = rederiveAssistantStatus(state.LastStopReason, state.LastBlockTypes, state.LastAssistantIsWorking)
+			case "user":
+				if state.LastIsInterrupt {
+					state.Status = StatusInterrupted
+				} else if state.LastHasToolResult {
+					state.Status = StatusResponding
+				} else if state.LastIsSystemInjectedUser {
 					state.Status = StatusIdle
+				} else {
+					recTime, err := time.Parse(time.RFC3339Nano, state.LastRecordTimestamp)
+					if err == nil && time.Since(recTime) < activeThreshold {
+						state.Status = StatusThinking
+					} else {
+						state.Status = StatusIdle
+					}
 				}
 			}
 		}
+		completionTime := ParseStatusTimestamp(state.LastRecordTimestamp)
+		state.Status, state.CompletedAt = ApplyCompletedAgoStatus(prevStatus, state.Status, prevCompletedAt, completionTime, time.Now())
 	}
 }
 

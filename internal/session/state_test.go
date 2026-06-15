@@ -217,7 +217,6 @@ func TestEncodeProjectDir(t *testing.T) {
 	}
 }
 
-
 func TestExtractOriginalTask(t *testing.T) {
 	records := []parser.Record{
 		{Type: "system", Message: json.RawMessage(`{"role":"system","content":"system prompt"}`)},
@@ -332,5 +331,51 @@ func TestCheckLastToolResultError_NoToolResult(t *testing.T) {
 	}
 	if CheckLastToolResultError(records) {
 		t.Error("expected false when no tool_result")
+	}
+}
+
+func TestApplyCompletedAgoStatus(t *testing.T) {
+	now := time.Now()
+	completedAt := now.Add(-5 * time.Second)
+	expiredCompletedAt := now.Add(-8*time.Hour - time.Second)
+
+	status, ts := ApplyCompletedAgoStatus(StatusResponding, StatusIdle, time.Time{}, completedAt, now)
+	if status != StatusCompletedAgo {
+		t.Fatalf("expected completed-ago status, got %s", status)
+	}
+	if ts.IsZero() {
+		t.Fatal("expected completed timestamp")
+	}
+
+	status, ts = ApplyCompletedAgoStatus(StatusCompletedAgo, StatusIdle, completedAt, time.Time{}, now)
+	if status != StatusCompletedAgo {
+		t.Fatalf("expected completed-ago to persist, got %s", status)
+	}
+	if ts.IsZero() {
+		t.Fatal("expected existing completed timestamp to persist")
+	}
+
+	status, ts = ApplyCompletedAgoStatus(StatusCompletedAgo, StatusThinking, completedAt, time.Time{}, now)
+	if status != StatusThinking {
+		t.Fatalf("expected active status to clear completed-ago, got %s", status)
+	}
+	if !ts.IsZero() {
+		t.Fatal("expected completed timestamp to clear when work resumes")
+	}
+
+	status, ts = ApplyCompletedAgoStatus(StatusCompletedAgo, StatusIdle, expiredCompletedAt, time.Time{}, now)
+	if status != StatusIdle {
+		t.Fatalf("expected expired completed-ago to become idle, got %s", status)
+	}
+	if !ts.IsZero() {
+		t.Fatal("expected completed timestamp to clear when completed-ago expires")
+	}
+
+	status, ts = ApplyCompletedAgoStatus(StatusResponding, StatusIdle, time.Time{}, expiredCompletedAt, now)
+	if status != StatusIdle {
+		t.Fatalf("expected old completion transition to stay idle, got %s", status)
+	}
+	if !ts.IsZero() {
+		t.Fatal("expected no completed timestamp for old completion transition")
 	}
 }

@@ -43,15 +43,16 @@ var (
 	}
 
 	statusStyles = map[session.Status]lipgloss.Style{
-		session.StatusThinking:    lipgloss.NewStyle().Background(lipgloss.Color("#D4A017")).Foreground(lipgloss.Color("0")).Bold(true), // Amber bg
-		session.StatusToolUse:     lipgloss.NewStyle().Background(lipgloss.Color("10")).Foreground(lipgloss.Color("0")).Bold(true),      // Green bg
-		session.StatusStreaming:   lipgloss.NewStyle().Background(lipgloss.Color("14")).Foreground(lipgloss.Color("0")).Bold(true),      // Cyan bg
-		session.StatusResponding:  lipgloss.NewStyle().Background(lipgloss.Color("10")).Foreground(lipgloss.Color("0")).Bold(true),      // Green bg (fallback)
-		session.StatusIdle:        lipgloss.NewStyle().Background(lipgloss.Color("240")).Foreground(lipgloss.Color("15")),               // Gray bg
-		session.StatusDone:        lipgloss.NewStyle().Background(lipgloss.Color("12")).Foreground(lipgloss.Color("15")).Bold(true),     // Blue bg
-		session.StatusError:       lipgloss.NewStyle().Background(lipgloss.Color("9")).Foreground(lipgloss.Color("15")).Bold(true),      // Red bg
-		session.StatusInterrupted: lipgloss.NewStyle().Background(lipgloss.Color("11")).Foreground(lipgloss.Color("0")).Bold(true),      // Yellow bg
-		session.StatusWaiting:     lipgloss.NewStyle().Background(lipgloss.Color("13")).Foreground(lipgloss.Color("0")).Bold(true),      // Magenta bg
+		session.StatusThinking:     lipgloss.NewStyle().Background(lipgloss.Color("#D4A017")).Foreground(lipgloss.Color("0")).Bold(true), // Amber bg
+		session.StatusToolUse:      lipgloss.NewStyle().Background(lipgloss.Color("12")).Foreground(lipgloss.Color("0")).Bold(true),      // Blue bg
+		session.StatusStreaming:    lipgloss.NewStyle().Background(lipgloss.Color("14")).Foreground(lipgloss.Color("0")).Bold(true),      // Cyan bg
+		session.StatusResponding:   lipgloss.NewStyle().Background(lipgloss.Color("13")).Foreground(lipgloss.Color("0")).Bold(true),      // Magenta bg
+		session.StatusCompletedAgo: lipgloss.NewStyle().Background(lipgloss.Color("10")).Foreground(lipgloss.Color("0")).Bold(true),      // Green bg
+		session.StatusIdle:         lipgloss.NewStyle().Background(lipgloss.Color("240")).Foreground(lipgloss.Color("0")),                // Gray bg
+		session.StatusDone:         lipgloss.NewStyle().Background(lipgloss.Color("10")).Foreground(lipgloss.Color("0")).Bold(true),      // Green bg
+		session.StatusError:        lipgloss.NewStyle().Background(lipgloss.Color("9")).Foreground(lipgloss.Color("0")).Bold(true),       // Red bg
+		session.StatusInterrupted:  lipgloss.NewStyle().Background(lipgloss.Color("11")).Foreground(lipgloss.Color("0")).Bold(true),      // Yellow bg
+		session.StatusWaiting:      lipgloss.NewStyle().Background(lipgloss.Color("6")).Foreground(lipgloss.Color("0")).Bold(true),       // Teal bg
 	}
 )
 
@@ -71,6 +72,7 @@ type cols struct {
 const (
 	tmuxColCap           = 30
 	projectColCap        = 30
+	statusColCap         = 32
 	notificationCooldown = 4 * time.Second
 )
 
@@ -96,7 +98,7 @@ func computeCols(sessions []session.State, now time.Time, termW int) cols {
 	c := cols{
 		pid:      len("PID") + 2,
 		provider: len("PROVIDER") + 2,
-		status:   len("Interrupted") + 2, // widest possible status
+		status:   len("STATUS") + 2,
 		dur:      len("DURATION") + 2,
 	}
 	idealProvider := len("PROVIDER") + 2
@@ -124,6 +126,9 @@ func computeCols(sessions []session.State, now time.Time, termW int) cols {
 		if w := len(providerLabel(s)) + 2; w > idealProvider {
 			idealProvider = w
 		}
+		if w := len(statusLabel(s, now)) + 2; w > c.status {
+			c.status = w
+		}
 		if hasTmux {
 			if w := len(s.TmuxSession) + 2; w > idealTmux {
 				idealTmux = w
@@ -139,6 +144,9 @@ func computeCols(sessions []session.State, now time.Time, termW int) cols {
 	}
 	if idealProject > projectColCap {
 		idealProject = projectColCap
+	}
+	if c.status > statusColCap {
+		c.status = statusColCap
 	}
 
 	numSep := 5
@@ -1062,6 +1070,8 @@ func shouldNotifyStatusTransition(previous, current session.Status) bool {
 		return previous != session.StatusError
 	case session.StatusDone:
 		return previous != session.StatusDone
+	case session.StatusCompletedAgo:
+		return isActiveWorkStatus(previous)
 	case session.StatusIdle:
 		return isActiveWorkStatus(previous)
 	default:
@@ -1070,14 +1080,11 @@ func shouldNotifyStatusTransition(previous, current session.Status) bool {
 }
 
 func isNotifiableStatus(status session.Status) bool {
-	return status == session.StatusDone || status == session.StatusError || status == session.StatusIdle
+	return status == session.StatusDone || status == session.StatusError || status == session.StatusIdle || status == session.StatusCompletedAgo
 }
 
 func isActiveWorkStatus(status session.Status) bool {
-	return status == session.StatusThinking ||
-		status == session.StatusToolUse ||
-		status == session.StatusStreaming ||
-		status == session.StatusResponding
+	return session.IsActiveWorkStatus(status)
 }
 
 func sessionNotificationKey(s session.State) string {
@@ -1113,6 +1120,8 @@ func notificationForSession(s session.State) notify.Notification {
 	case session.StatusError:
 		title = fmt.Sprintf("%s error: %s", providerLabel(s), project)
 	case session.StatusIdle:
+		title = fmt.Sprintf("%s response complete: %s", providerLabel(s), project)
+	case session.StatusCompletedAgo:
 		title = fmt.Sprintf("%s response complete: %s", providerLabel(s), project)
 	}
 
@@ -1173,7 +1182,7 @@ func renderRow(s session.State, now time.Time, c cols, isCursor, isMarked, isKil
 	if !s.StartTime.IsZero() {
 		dur = session.FormatDuration(now.Sub(s.StartTime))
 	}
-	action := actionForStatus(s)
+	action := actionForStatus(s, now)
 	if isKilling {
 		action = "Killing…"
 	}
@@ -1199,7 +1208,7 @@ func renderRow(s session.State, now time.Time, c cols, isCursor, isMarked, isKil
 		pidCell,
 		styledProvider(providerLabel(s), c.provider),
 		projectStyle.Width(c.project).Render(truncate(s.ProjectName, c.project)),
-		styledStatusCell(s.Status, c.status, isKilling),
+		styledStatusCell(s, now, c.status, isKilling),
 		actionStyle.Width(c.action).Render(truncate(action, c.action)),
 		durationStyle.Width(c.dur).Render(truncate(dur, c.dur)),
 	}
@@ -1217,21 +1226,30 @@ func renderRow(s session.State, now time.Time, c cols, isCursor, isMarked, isKil
 	return joinCols(cells)
 }
 
-var killingStatusStyle = lipgloss.NewStyle().Background(lipgloss.Color("9")).Foreground(lipgloss.Color("15")).Bold(true)
+var killingStatusStyle = lipgloss.NewStyle().Background(lipgloss.Color("9")).Foreground(lipgloss.Color("0")).Bold(true)
 
-func styledStatusCell(status session.Status, width int, isKilling bool) string {
+func styledStatusCell(s session.State, now time.Time, width int, isKilling bool) string {
 	if isKilling {
 		return killingStatusStyle.Width(width).Render(truncate("KILLING", width))
 	}
-	return styledStatus(status, width)
+	return styledStatus(s, now, width)
 }
 
-func styledStatus(status session.Status, width int) string {
-	style, ok := statusStyles[status]
+func styledStatus(s session.State, now time.Time, width int) string {
+	style, ok := statusStyles[s.Status]
 	if !ok {
-		style = lipgloss.NewStyle()
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("0"))
 	}
-	return style.Width(width).Render(truncate(string(status), width))
+	return style.Width(width).Render(truncate(statusLabel(s, now), width))
+}
+
+func statusLabel(s session.State, now time.Time) string {
+	switch s.Status {
+	case session.StatusCompletedAgo, session.StatusDone:
+		return "Done"
+	default:
+		return string(s.Status)
+	}
 }
 
 func styledProvider(provider string, width int) string {
@@ -1262,7 +1280,7 @@ func hline(width int) string {
 
 // actionForStatus returns the action text appropriate for the session's status.
 // Only show the current action when Claude is actively working.
-func actionForStatus(s session.State) string {
+func actionForStatus(s session.State, now time.Time) string {
 	switch s.Status {
 	case session.StatusThinking:
 		return "Thinking..."
@@ -1279,7 +1297,9 @@ func actionForStatus(s session.State) string {
 		}
 		return "Processing..."
 	case session.StatusDone:
-		return "Completed"
+		return "Finished"
+	case session.StatusCompletedAgo:
+		return completedAgoAction(s, now)
 	case session.StatusInterrupted:
 		return "Interrupted by user"
 	case session.StatusWaiting:
@@ -1287,6 +1307,17 @@ func actionForStatus(s session.State) string {
 	default:
 		return ""
 	}
+}
+
+func completedAgoAction(s session.State, now time.Time) string {
+	if s.CompletedAt.IsZero() {
+		return "Finished"
+	}
+	elapsed := now.Sub(s.CompletedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return fmt.Sprintf("Finished %s ago", session.FormatDuration(elapsed))
 }
 
 func statusPriority(s session.Status) int {
@@ -1304,6 +1335,8 @@ func statusPriority(s session.Status) int {
 	case session.StatusInterrupted:
 		return 2
 	case session.StatusIdle:
+		return 3
+	case session.StatusCompletedAgo:
 		return 3
 	case session.StatusWaiting:
 		return 4

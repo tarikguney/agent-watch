@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,11 @@ import (
 )
 
 func TestCopilotProvider_DiscoverLoadUpdate(t *testing.T) {
+	base := time.Now().UTC().Add(-10 * time.Second)
+	ts := func(offset time.Duration) string {
+		return base.Add(offset).Format(time.RFC3339Nano)
+	}
+
 	root := t.TempDir()
 	sessionDir := filepath.Join(root, "session-state", "sess-1")
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
@@ -20,19 +26,19 @@ func TestCopilotProvider_DiscoverLoadUpdate(t *testing.T) {
 		"repository: watch-target\n" +
 		"branch: main\n" +
 		"summary: investigate flaky test\n" +
-		"created_at: 2026-01-02T03:04:05Z\n" +
-		"updated_at: 2026-01-02T03:04:08Z\n"
+		fmt.Sprintf("created_at: %s\n", ts(0)) +
+		fmt.Sprintf("updated_at: %s\n", ts(3*time.Second))
 	if err := os.WriteFile(filepath.Join(sessionDir, "workspace.yaml"), []byte(workspace), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	eventsPath := filepath.Join(sessionDir, "events.jsonl")
 	initialEvents := "" +
-		`{"type":"session.start","id":"e1","timestamp":"2026-01-02T03:04:05Z","data":{"sessionId":"sess-1","startTime":"2026-01-02T03:04:05Z"}}` + "\n" +
-		`{"type":"user.message","id":"e2","timestamp":"2026-01-02T03:04:06Z","data":{"content":"Investigate flaky test"}}` + "\n" +
-		`{"type":"assistant.turn_start","id":"e3","timestamp":"2026-01-02T03:04:07Z","data":{}}` + "\n" +
-		`{"type":"assistant.message","id":"e4","timestamp":"2026-01-02T03:04:08Z","data":{"content":"I will inspect main.go","toolRequests":[{"toolName":"Read","arguments":{"file_path":"main.go"}}]}}` + "\n" +
-		`{"type":"tool.execution_start","id":"e5","timestamp":"2026-01-02T03:04:09Z","data":{"toolName":"Read","arguments":{"file_path":"main.go"}}}` + "\n"
+		fmt.Sprintf(`{"type":"session.start","id":"e1","timestamp":"%s","data":{"sessionId":"sess-1","startTime":"%s"}}`, ts(0), ts(0)) + "\n" +
+		fmt.Sprintf(`{"type":"user.message","id":"e2","timestamp":"%s","data":{"content":"Investigate flaky test"}}`, ts(1*time.Second)) + "\n" +
+		fmt.Sprintf(`{"type":"assistant.turn_start","id":"e3","timestamp":"%s","data":{}}`, ts(2*time.Second)) + "\n" +
+		fmt.Sprintf(`{"type":"assistant.message","id":"e4","timestamp":"%s","data":{"content":"I will inspect main.go","toolRequests":[{"toolName":"Read","arguments":{"file_path":"main.go"}}]}}`, ts(3*time.Second)) + "\n" +
+		fmt.Sprintf(`{"type":"tool.execution_start","id":"e5","timestamp":"%s","data":{"toolName":"Read","arguments":{"file_path":"main.go"}}}`, ts(4*time.Second)) + "\n"
 	if err := os.WriteFile(eventsPath, []byte(initialEvents), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +88,7 @@ func TestCopilotProvider_DiscoverLoadUpdate(t *testing.T) {
 	}
 
 	appendEvents(t, eventsPath,
-		`{"type":"tool.execution_complete","id":"e6","timestamp":"2026-01-02T03:04:10Z","data":{"success":true}}`+"\n",
+		fmt.Sprintf(`{"type":"tool.execution_complete","id":"e6","timestamp":"%s","data":{"success":true}}`, ts(5*time.Second))+"\n",
 	)
 	updated, err := provider.UpdateSession(eventsPath, state)
 	if err != nil {
@@ -93,14 +99,17 @@ func TestCopilotProvider_DiscoverLoadUpdate(t *testing.T) {
 	}
 
 	appendEvents(t, eventsPath,
-		`{"type":"assistant.turn_end","id":"e7","timestamp":"2026-01-02T03:04:11Z","data":{}}`+"\n",
+		fmt.Sprintf(`{"type":"assistant.turn_end","id":"e7","timestamp":"%s","data":{}}`, ts(6*time.Second))+"\n",
 	)
 	updated, err = provider.UpdateSession(eventsPath, updated)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != StatusIdle {
+	if updated.Status != StatusCompletedAgo {
 		t.Fatalf("status after assistant.turn_end: got %s", updated.Status)
+	}
+	if updated.CompletedAt.IsZero() {
+		t.Fatal("expected completed-at timestamp after assistant.turn_end")
 	}
 }
 

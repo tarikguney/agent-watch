@@ -121,8 +121,11 @@ func TestRender_WithSessions(t *testing.T) {
 	if !strings.Contains(output, "cli-tool") {
 		t.Error("expected project name 'cli-tool'")
 	}
-	if !strings.Contains(output, "Completed") {
-		t.Error("expected 'Completed' for done session")
+	if !strings.Contains(output, "Done") {
+		t.Error("expected 'Done' status for done session")
+	}
+	if !strings.Contains(output, "Finished") {
+		t.Error("expected 'Finished' action for done session")
 	}
 }
 
@@ -327,6 +330,7 @@ func TestStatusPriority(t *testing.T) {
 }
 
 func TestActionForStatus_NewStatuses(t *testing.T) {
+	now := time.Date(2026, time.June, 15, 14, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name     string
 		state    session.State
@@ -352,15 +356,31 @@ func TestActionForStatus_NewStatuses(t *testing.T) {
 			state:    session.State{Status: session.StatusStreaming},
 			expected: "Streaming response...",
 		},
+		{
+			name:     "CompletedAgo shows Finished X ago",
+			state:    session.State{Status: session.StatusCompletedAgo, CompletedAt: now.Add(-5 * time.Second)},
+			expected: "Finished 5s ago",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := actionForStatus(tt.state)
+			got := actionForStatus(tt.state, now)
 			if got != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, got)
 			}
 		})
+	}
+}
+
+func TestStatusLabel_CompletedAgo(t *testing.T) {
+	now := time.Now()
+	label := statusLabel(session.State{
+		Status:      session.StatusCompletedAgo,
+		CompletedAt: now.Add(-5 * time.Second),
+	}, now)
+	if label != "Done" {
+		t.Fatalf("unexpected completed-ago label: %q", label)
 	}
 }
 
@@ -595,6 +615,41 @@ func TestProcessNotifications_IdleAfterWorkSendsNotification(t *testing.T) {
 			Cwd:          `C:\work\demo`,
 			ProjectName:  "demo",
 			Status:       session.StatusIdle,
+			LastPrompt:   "summarize current changes",
+			LastResponse: "Done. I summarized the latest code updates.",
+			LastUpdate:   now,
+		},
+	})
+
+	if !waitForCount(notifier, 1) {
+		t.Fatalf("expected 1 notification, got %d", notifier.count())
+	}
+	if notifier.titleAt(0) != "CLAUDE response complete: demo" {
+		t.Fatalf("unexpected notification title: %q", notifier.titleAt(0))
+	}
+}
+
+func TestProcessNotifications_CompletedAgoAfterWorkSendsNotification(t *testing.T) {
+	notifier := &fakeNotifier{supported: true}
+	now := time.Now()
+	m := Model{
+		notifier:             notifier,
+		notificationsEnabled: true,
+		mutedNotifications:   make(map[string]bool),
+		notificationStates: map[string]session.Status{
+			`c:\work\demo`: session.StatusResponding,
+		},
+		notificationStartedAt: now.Add(-1 * time.Minute),
+	}
+
+	m.processNotifications([]session.State{
+		{
+			Provider:     "claude",
+			PID:          12345,
+			Cwd:          `C:\work\demo`,
+			ProjectName:  "demo",
+			Status:       session.StatusCompletedAgo,
+			CompletedAt:  now.Add(-3 * time.Second),
 			LastPrompt:   "summarize current changes",
 			LastResponse: "Done. I summarized the latest code updates.",
 			LastUpdate:   now,
