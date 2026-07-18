@@ -5,6 +5,7 @@
 package session
 
 import (
+	"fmt"
 	"path/filepath"
 	"sync"
 
@@ -198,6 +199,11 @@ func deduplicateByCwd(sessions []State) []State {
 			key = s.FilePath
 		}
 		key = filepath.Clean(key)
+		// Distinct processes are distinct sessions even in the same cwd;
+		// only dedupe rows that share a PID.
+		if s.PID > 0 {
+			key = fmt.Sprintf("%s|pid-%d", key, s.PID)
+		}
 		existing, ok := best[key]
 		if !ok || s.FileModTime.After(existing.FileModTime) {
 			best[key] = s

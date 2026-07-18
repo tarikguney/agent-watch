@@ -116,21 +116,22 @@ func listUnix() ([]Info, error) {
 			continue
 		}
 
-		// Only consider lines that have --session-id (definitive Claude CLI sessions).
-		// This avoids false positives from other processes with "claude" in the name.
-		if !strings.Contains(line, "--session-id") {
-			continue
-		}
-
 		// Skip agent-watch itself
 		if strings.Contains(line, "agent-watch") {
 			continue
 		}
 
-		info := parseUnixLineWithCache(line, cache)
-		if info.SessionID != "" && info.PID > 0 {
-			results = append(results, info)
+		info, cmdLine, ok := parseUnixLineBase(line, cache)
+		if !ok || info.PID <= 0 {
+			continue
 		}
+		// Interactive sessions launched as plain `claude` carry no --session-id;
+		// accept them by binary name and let cwd-based matching pair them to a transcript.
+		if !strings.Contains(line, "--session-id") && !isClaudeCommand("", cmdLine) {
+			continue
+		}
+		info.SessionID = extractFlag(sessionIDRe, cmdLine)
+		results = append(results, info)
 	}
 	return results, nil
 }

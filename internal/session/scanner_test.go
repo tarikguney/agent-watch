@@ -153,3 +153,25 @@ func TestScanner_MultipleProjects(t *testing.T) {
 	}
 }
 
+
+func TestDeduplicateByCwd_DistinctPIDsSameCwd(t *testing.T) {
+	sessions := []State{
+		{FilePath: "/p/a.jsonl", Cwd: "/home/user", PID: 100},
+		{FilePath: "/p/b.jsonl", Cwd: "/home/user", PID: 200},
+	}
+	result := deduplicateByCwd(sessions)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 sessions for distinct PIDs in same cwd, got %d", len(result))
+	}
+}
+
+func TestDeduplicateByCwd_SamePID(t *testing.T) {
+	sessions := []State{
+		{FilePath: "/p/a.jsonl", Cwd: "/home/user", PID: 100},
+		{FilePath: "/p/b.jsonl", Cwd: "/home/user", PID: 100},
+	}
+	result := deduplicateByCwd(sessions)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 session for same PID, got %d", len(result))
+	}
+}
