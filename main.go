@@ -171,8 +171,11 @@ func runWindowsNotificationTest(notifier notify.Notifier) error {
 		return fmt.Errorf("--test-windows-notification is only supported on Windows")
 	}
 	return notifier.Notify(notify.Notification{
-		Title:   "agent-watch test notification",
-		Message: "Windows notifications are enabled for agent-watch.",
+		Title:    "✓ agent-watch is complete",
+		Project:  "agent-watch",
+		Source:   "TEST NOTIFICATION",
+		Prompt:   "Make Windows notifications easier to read.",
+		Response: "Adaptive ToastGeneric notifications are enabled.",
 	})
 }
 

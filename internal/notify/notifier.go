@@ -6,8 +6,12 @@ package notify
 
 // Notification is the platform-neutral payload for a user-facing alert.
 type Notification struct {
-	Title   string
-	Message string
+	Title    string
+	Message  string
+	Project  string
+	Source   string
+	Prompt   string
+	Response string
 }
 
 // Notifier sends user-facing notifications for agent-watch events.

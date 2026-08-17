@@ -50,6 +50,12 @@ func (f *fakeNotifier) messageAt(i int) string {
 	return f.notifications[i].Message
 }
 
+func (f *fakeNotifier) notificationAt(i int) notify.Notification {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.notifications[i]
+}
+
 // waitForCount waits up to 1s for the notifier to receive `want` notifications.
 func waitForCount(f *fakeNotifier, want int) bool {
 	deadline := time.Now().Add(1 * time.Second)
@@ -482,6 +488,7 @@ func TestProcessNotifications_TerminalTransitionSendsNotification(t *testing.T) 
 			PID:          12345,
 			Cwd:          `C:\work\demo`,
 			ProjectName:  "demo",
+			TmuxSession:  "agents/notification-ui",
 			Status:       session.StatusDone,
 			LastPrompt:   "add Windows notifications",
 			LastResponse: "Windows notifications are enabled by default on Windows.",
@@ -492,12 +499,19 @@ func TestProcessNotifications_TerminalTransitionSendsNotification(t *testing.T) 
 	if !waitForCount(notifier, 1) {
 		t.Fatalf("expected 1 notification, got %d", notifier.count())
 	}
-	if notifier.titleAt(0) != "CLAUDE completed: demo" {
+	if notifier.titleAt(0) != "✓ notification-ui is complete" {
 		t.Fatalf("unexpected notification title: %q", notifier.titleAt(0))
 	}
 	wantMessage := "Project: demo\nPrompt: add Windows notifications\nResponse: Windows notifications are enabled by default on Windows."
 	if notifier.messageAt(0) != wantMessage {
 		t.Fatalf("unexpected notification message: %q", notifier.messageAt(0))
+	}
+	notification := notifier.notificationAt(0)
+	if notification.Project != "demo" ||
+		notification.Source != "CLAUDE" ||
+		notification.Prompt != "add Windows notifications" ||
+		notification.Response != "Windows notifications are enabled by default on Windows." {
+		t.Fatalf("unexpected structured notification: %#v", notification)
 	}
 }
 
@@ -654,7 +668,7 @@ func TestProcessNotifications_IdleAfterWorkSendsNotification(t *testing.T) {
 	if !waitForCount(notifier, 1) {
 		t.Fatalf("expected 1 notification, got %d", notifier.count())
 	}
-	if notifier.titleAt(0) != "CLAUDE response complete: demo" {
+	if notifier.titleAt(0) != "✓ demo is complete" {
 		t.Fatalf("unexpected notification title: %q", notifier.titleAt(0))
 	}
 }
@@ -689,7 +703,7 @@ func TestProcessNotifications_CompletedAgoAfterWorkSendsNotification(t *testing.
 	if !waitForCount(notifier, 1) {
 		t.Fatalf("expected 1 notification, got %d", notifier.count())
 	}
-	if notifier.titleAt(0) != "CLAUDE response complete: demo" {
+	if notifier.titleAt(0) != "✓ demo is complete" {
 		t.Fatalf("unexpected notification title: %q", notifier.titleAt(0))
 	}
 }

@@ -1129,14 +1129,11 @@ func displayProjectName(s session.State) string {
 
 func notificationForSession(s session.State) notify.Notification {
 	project := displayProjectName(s)
-	title := fmt.Sprintf("%s completed: %s", providerLabel(s), project)
+	subject := notificationSubjectName(s)
+	title := fmt.Sprintf("✓ %s is complete", subject)
 	switch s.Status {
 	case session.StatusError:
-		title = fmt.Sprintf("%s error: %s", providerLabel(s), project)
-	case session.StatusIdle:
-		title = fmt.Sprintf("%s response complete: %s", providerLabel(s), project)
-	case session.StatusCompletedAgo:
-		title = fmt.Sprintf("%s response complete: %s", providerLabel(s), project)
+		title = fmt.Sprintf("! %s has an error", subject)
 	}
 
 	prompt := "n/a"
@@ -1149,16 +1146,25 @@ func notificationForSession(s session.State) notify.Notification {
 		response = truncateNotificationLine(s.LastResponse, 120)
 	}
 
-	message := strings.Join([]string{
-		"Project: " + truncateNotificationLine(project, 60),
-		"Prompt: " + prompt,
-		"Response: " + response,
-	}, "\n")
+	project = truncateNotificationLine(project, 60)
 
 	return notify.Notification{
-		Title:   title,
-		Message: message,
+		Title:    title,
+		Message:  strings.Join([]string{"Project: " + project, "Prompt: " + prompt, "Response: " + response}, "\n"),
+		Project:  project,
+		Source:   providerLabel(s),
+		Prompt:   prompt,
+		Response: response,
 	}
+}
+
+func notificationSubjectName(s session.State) string {
+	if _, windowName, ok := strings.Cut(s.TmuxSession, "/"); ok {
+		if windowName = strings.TrimSpace(windowName); windowName != "" {
+			return windowName
+		}
+	}
+	return displayProjectName(s)
 }
 
 func truncateNotificationLine(s string, maxLen int) string {
