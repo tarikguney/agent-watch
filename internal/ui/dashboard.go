@@ -1159,10 +1159,8 @@ func notificationForSession(s session.State) notify.Notification {
 }
 
 func notificationSubjectName(s session.State) string {
-	if _, windowName, ok := strings.Cut(s.TmuxSession, "/"); ok {
-		if windowName = strings.TrimSpace(windowName); windowName != "" {
-			return windowName
-		}
+	if tmuxSession := strings.TrimSpace(s.TmuxSession); tmuxSession != "" {
+		return tmuxSession
 	}
 	return displayProjectName(s)
 }

@@ -499,7 +499,7 @@ func TestProcessNotifications_TerminalTransitionSendsNotification(t *testing.T) 
 	if !waitForCount(notifier, 1) {
 		t.Fatalf("expected 1 notification, got %d", notifier.count())
 	}
-	if notifier.titleAt(0) != "✓ notification-ui is complete" {
+	if notifier.titleAt(0) != "✓ agents/notification-ui is complete" {
 		t.Fatalf("unexpected notification title: %q", notifier.titleAt(0))
 	}
 	wantMessage := "Project: demo\nPrompt: add Windows notifications\nResponse: Windows notifications are enabled by default on Windows."
