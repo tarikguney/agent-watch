@@ -1131,6 +1131,42 @@ func TestCompose_EmptyPromptSendsNothing(t *testing.T) {
 	}
 }
 
+func TestCompose_F2SubmitsPrompt(t *testing.T) {
+	m := newBroadcastModel(1)
+	m = pressRune(m, 's')
+	m.promptInput.SetValue("hello")
+
+	m = pressKey(m, tea.KeyF2)
+
+	if m.composing {
+		t.Fatal("expected compose mode to exit on F2")
+	}
+	if !strings.Contains(m.statusMsg, "Sent to 0/1") {
+		t.Fatalf("expected F2 to submit the prompt, got status %q", m.statusMsg)
+	}
+}
+
+func TestCompose_MouseInputIgnored(t *testing.T) {
+	m := newBroadcastModel(1)
+	m = pressRune(m, 's')
+	m.promptInput.SetValue("hello")
+
+	updated, _ := m.Update(tea.MouseMsg{
+		X:      36,
+		Y:      7,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	m = updated.(Model)
+
+	if got := m.promptInput.Value(); got != "hello" {
+		t.Fatalf("mouse input changed prompt to %q", got)
+	}
+	if !m.composing {
+		t.Fatal("mouse input unexpectedly closed compose mode")
+	}
+}
+
 // TestCompose_EnterInsertsNewlineNotSend verifies Enter is a newline in the
 // multiline editor and does not submit/exit compose mode.
 func TestCompose_EnterInsertsNewlineNotSend(t *testing.T) {

@@ -183,12 +183,9 @@ func TestActivationScriptPostsValidatedCallback(t *testing.T) {
 	}
 	activationURI := "agent-watch://activate?port=" + port + "&token=" + token
 	output, err := exec.Command(
-		"powershell.exe",
-		"-NoProfile",
-		"-NonInteractive",
-		"-ExecutionPolicy",
-		"Bypass",
-		"-File",
+		"wscript.exe",
+		"//B",
+		"//Nologo",
 		scriptPath,
 		activationURI,
 	).CombinedOutput()
@@ -205,19 +202,19 @@ func TestActivationScriptPostsValidatedCallback(t *testing.T) {
 
 func TestActivationProtocolCommandIsHiddenAndForwardsURI(t *testing.T) {
 	t.Setenv("SystemRoot", `C:\Windows`)
-	command := activationProtocolCommand(`C:\Users\demo\AppData\Local\agent-watch\activate-notification.ps1`)
+	command := activationProtocolCommand(`C:\Users\demo\AppData\Local\agent-watch\activate-notification.vbs`)
 
 	for _, expected := range []string{
-		`"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"`,
-		"-WindowStyle Hidden",
-		`-File "C:\Users\demo\AppData\Local\agent-watch\activate-notification.ps1"`,
+		`"C:\Windows\System32\wscript.exe"`,
+		"//B //Nologo",
+		`"C:\Users\demo\AppData\Local\agent-watch\activate-notification.vbs"`,
 		`"%1"`,
 	} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("expected command to contain %q, got %q", expected, command)
 		}
 	}
-	if strings.Contains(command, `"%%1"`) {
+	if strings.Contains(command, "powershell.exe") || strings.Contains(command, `"%%1"`) {
 		t.Fatalf("protocol command retained escaped placeholder: %q", command)
 	}
 }

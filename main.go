@@ -164,7 +164,7 @@ func run(
 	}()
 
 	m := ui.NewModel(scanner, compact, refresh, notifier, windowsNotifications)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
 	return err
 }

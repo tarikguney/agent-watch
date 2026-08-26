@@ -251,11 +251,10 @@ func SwitchToPane(target string, paneID string) error {
 }
 
 // SendPrompt types a prompt into the given pane and submits it with Enter.
-// sendTarget must be a fully-qualified "session:window.pane" target — psmux
-// numbers panes per-session, so a bare pane ID ("%1") is ambiguous and can be
-// delivered to the wrong session. The text is sent literally (-l) so it is not
-// interpreted as key names, then a separate Enter key submits it.
-func SendPrompt(sendTarget string, prompt string) error {
+// PSMUX is routed to the target session through PSMUX_SESSION_NAME and addressed
+// by pane ID. This avoids older PSMUX versions silently falling back to the
+// active pane when a fully-qualified target cannot be resolved.
+func SendPrompt(sendTarget string, paneID string, prompt string) error {
 	bin := tmuxBin()
 	if bin == "" {
 		return fmt.Errorf("no tmux binary available")
@@ -270,22 +269,38 @@ func SendPrompt(sendTarget string, prompt string) error {
 		session = sendTarget[:idx]
 	}
 	env := envWithSession(session)
+	commandTarget := promptCommandTarget(bin, sendTarget, paneID)
+	if commandTarget == "" {
+		return fmt.Errorf("session has no resolved pane ID")
+	}
 
 	// 1. Type the prompt literally so special characters aren't parsed as keys.
-	typeCmd := exec.Command(bin, "send-keys", "-t", sendTarget, "-l", prompt)
+	typeCmd := exec.Command(bin, "send-keys", "-t", commandTarget, "-l", prompt)
 	typeCmd.Env = env
 	if out, err := typeCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("send-keys: %s", strings.TrimSpace(string(out)))
 	}
 
 	// 2. Submit with Enter (a key name, so sent without -l).
-	enterCmd := exec.Command(bin, "send-keys", "-t", sendTarget, "Enter")
+	enterCmd := exec.Command(bin, "send-keys", "-t", commandTarget, "Enter")
 	enterCmd.Env = env
 	if out, err := enterCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("send-keys Enter: %s", strings.TrimSpace(string(out)))
 	}
 
 	return nil
+}
+
+func promptCommandTarget(bin string, sendTarget string, paneID string) string {
+	name := bin
+	if separator := strings.LastIndexAny(name, `\/`); separator >= 0 {
+		name = name[separator+1:]
+	}
+	name = strings.TrimSuffix(strings.ToLower(name), ".exe")
+	if name == "psmux" {
+		return paneID
+	}
+	return sendTarget
 }
 
 // envWithSession returns a copy of os.Environ with PSMUX_SESSION_NAME set to

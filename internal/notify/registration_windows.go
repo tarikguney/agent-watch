@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	appRegistrationKey = `SOFTWARE\Classes\AppUserModelId\` + appID
-	protocolKey        = `SOFTWARE\Classes\` + protocolScheme
-	shortcutName       = "Agent Watch.lnk"
-	legacyShortcutName = "agent-watch.lnk"
-	activationScript   = "activate-notification.ps1"
+	appRegistrationKey     = `SOFTWARE\Classes\AppUserModelId\` + appID
+	protocolKey            = `SOFTWARE\Classes\` + protocolScheme
+	shortcutName           = "Agent Watch.lnk"
+	legacyShortcutName     = "agent-watch.lnk"
+	activationScript       = "activate-notification.vbs"
+	legacyActivationScript = "activate-notification.ps1"
 
 	clsctxInprocServer      = 1
 	coinitApartmentThreaded = 2
@@ -35,12 +36,13 @@ const (
 )
 
 var (
-	ole32                = windows.NewLazySystemDLL("ole32.dll")
-	procCoInitializeEx   = ole32.NewProc("CoInitializeEx")
-	procCoUninitialize   = ole32.NewProc("CoUninitialize")
-	procCoCreateInstance = ole32.NewProc("CoCreateInstance")
-	user32               = windows.NewLazySystemDLL("user32.dll")
-	procGetForegroundWnd = user32.NewProc("GetForegroundWindow")
+	ole32                        = windows.NewLazySystemDLL("ole32.dll")
+	procCoInitializeEx           = ole32.NewProc("CoInitializeEx")
+	procCoUninitialize           = ole32.NewProc("CoUninitialize")
+	procCoCreateInstance         = ole32.NewProc("CoCreateInstance")
+	user32                       = windows.NewLazySystemDLL("user32.dll")
+	procGetForegroundWnd         = user32.NewProc("GetForegroundWindow")
+	procGetWindowThreadProcessID = user32.NewProc("GetWindowThreadProcessId")
 
 	clsidShellLink   = mustGUID("{00021401-0000-0000-C000-000000000046}")
 	iidShellLinkW    = mustGUID("{000214F9-0000-0000-C000-000000000046}")
@@ -191,59 +193,78 @@ func ensureAppRegistration() (string, error) {
 }
 
 func ensureActivationScript(path string) error {
-	const script = `param([Parameter(Mandatory = $true)][string]$ActivationUri)
-$ErrorActionPreference = 'Stop'
+	const script = `Option Explicit
 
-try {
-    $uri = [Uri]$ActivationUri
-    if ($uri.Scheme -ne 'agent-watch') {
-        exit 2
-    }
+If WScript.Arguments.Count <> 1 Then
+    WScript.Quit 2
+End If
 
-    $parameters = @{}
-    foreach ($part in $uri.Query.TrimStart('?').Split('&')) {
-        if ([string]::IsNullOrWhiteSpace($part)) {
-            continue
-        }
-        $pair = $part.Split('=', 2)
-        $name = [Uri]::UnescapeDataString($pair[0])
-        $value = if ($pair.Length -eq 2) { [Uri]::UnescapeDataString($pair[1]) } else { '' }
-        $parameters[$name] = $value
-    }
+Dim activationUri, queryStart
+activationUri = WScript.Arguments(0)
+If LCase(Left(activationUri, 23)) <> "agent-watch://activate?" Then
+    WScript.Quit 2
+End If
 
-    [int]$port = 0
-    if (-not [int]::TryParse($parameters['port'], [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
-        exit 3
-    }
-    $token = $parameters['token']
-    if ($token -notmatch '^[0-9a-f]{48}$') {
-        exit 4
-    }
+queryStart = InStr(activationUri, "?")
+If queryStart = 0 Then
+    WScript.Quit 2
+End If
 
-    $callback = "http://127.0.0.1:$port/activate/$token"
-    Invoke-WebRequest -UseBasicParsing -Method Post -Uri $callback -TimeoutSec 5 | Out-Null
+Dim parameters, part, pair, name, value
+Set parameters = CreateObject("Scripting.Dictionary")
+For Each part In Split(Mid(activationUri, queryStart + 1), "&")
+    pair = Split(part, "=", 2)
+    name = LCase(pair(0))
+    value = ""
+    If UBound(pair) = 1 Then
+        value = pair(1)
+    End If
+    parameters(name) = value
+Next
 
-    [long]$window = 0
-    if ([long]::TryParse($parameters['window'], [ref]$window) -and $window -ne 0) {
-        Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class AgentWatchWindow {
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-}
-'@
-        [AgentWatchWindow]::ShowWindow([IntPtr]$window, 9) | Out-Null
-        [AgentWatchWindow]::SetForegroundWindow([IntPtr]$window) | Out-Null
-    }
-} catch {
-    exit 1
-}
+If Not parameters.Exists("port") Or Not IsNumeric(parameters("port")) Then
+    WScript.Quit 3
+End If
+Dim port
+port = CLng(parameters("port"))
+If port < 1 Or port > 65535 Then
+    WScript.Quit 3
+End If
+
+If Not parameters.Exists("token") Then
+    WScript.Quit 4
+End If
+Dim tokenPattern
+Set tokenPattern = New RegExp
+tokenPattern.Pattern = "^[0-9a-f]{48}$"
+If Not tokenPattern.Test(parameters("token")) Then
+    WScript.Quit 4
+End If
+
+Dim request
+Set request = CreateObject("WinHttp.WinHttpRequest.5.1")
+request.SetTimeouts 2000, 2000, 2000, 5000
+request.Open "POST", "http://127.0.0.1:" & port & "/activate/" & parameters("token"), False
+request.Send
+If request.Status <> 204 Then
+    WScript.Quit 5
+End If
+
+If parameters.Exists("process") And IsNumeric(parameters("process")) Then
+    Dim terminalProcess, shell
+    terminalProcess = CLng(parameters("process"))
+    If terminalProcess > 0 Then
+        Set shell = CreateObject("WScript.Shell")
+        shell.AppActivate terminalProcess
+    End If
+End If
 `
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 		return fmt.Errorf("write notification activation script: %w", err)
+	}
+	legacyPath := filepath.Join(filepath.Dir(path), legacyActivationScript)
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove legacy notification activation script: %w", err)
 	}
 	return nil
 }
@@ -284,10 +305,10 @@ func activationProtocolCommand(scriptPath string) string {
 	if systemRoot == "" {
 		systemRoot = `C:\Windows`
 	}
-	powerShell := filepath.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	wscript := filepath.Join(systemRoot, "System32", "wscript.exe")
 	return fmt.Sprintf(
-		`"%s" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "%s" "%%1"`,
-		powerShell,
+		`"%s" //B //Nologo "%s" "%%1"`,
+		wscript,
 		scriptPath,
 	)
 }
@@ -295,6 +316,15 @@ func activationProtocolCommand(scriptPath string) string {
 func foregroundWindow() uintptr {
 	window, _, _ := procGetForegroundWnd.Call()
 	return window
+}
+
+func windowProcessID(window uintptr) uint32 {
+	if window == 0 {
+		return 0
+	}
+	var processID uint32
+	procGetWindowThreadProcessID.Call(window, uintptr(unsafe.Pointer(&processID)))
+	return processID
 }
 
 func registerAppMetadata(executable, iconPath string) error {

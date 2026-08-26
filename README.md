@@ -134,7 +134,7 @@ agent-watch detects tmux, psmux, and pmux automatically (set `CLAUDE_WATCH_TMUX_
 You can send the **same prompt to several running agents at once**, directly from the dashboard:
 
 1. Mark the sessions you want with `Space` (a gold `*` appears in the gutter and the title bar shows `[selected: N]`). Use `v` to mark or clear every visible row, and `Esc` to clear the selection.
-2. Press `s` to open the prompt dialog. It's a multiline editor: type your prompt, press `Enter` for a new line, and press `Ctrl+D` to send (or `Esc` to cancel).
+2. Press `s` to open the prompt dialog. It's a multiline editor: type your prompt, press `Enter` for a new line, and press `F2` to send (or `Esc` to cancel). `Ctrl+D` also sends when the terminal preserves that key combination.
 3. If no rows are marked, the prompt is sent to the session under the cursor.
 
 The prompt is delivered by typing it into each agent's multiplexer pane and submitting it (via `send-keys`), so **broadcasting only works for sessions running inside tmux, psmux, or pmux**. Sessions that aren't in a multiplexer are skipped and reported in the status bar, e.g. `Sent to 3/5 agents  |  2 skipped: not in a multiplexer`.

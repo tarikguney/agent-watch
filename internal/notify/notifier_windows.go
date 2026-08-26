@@ -76,15 +76,15 @@ type activationTarget struct {
 }
 
 type windowsNotifier struct {
-	registrationErr  error
-	iconURI          string
-	activationPort   string
-	activationWindow uintptr
-	activations      chan Activation
-	server           *http.Server
-	listener         net.Listener
-	mu               sync.Mutex
-	targets          map[string]activationTarget
+	registrationErr   error
+	iconURI           string
+	activationPort    string
+	activationProcess uint32
+	activations       chan Activation
+	server            *http.Server
+	listener          net.Listener
+	mu                sync.Mutex
+	targets           map[string]activationTarget
 }
 
 // NewWindowsNotifier returns the native Windows notifier implementation.
@@ -93,12 +93,13 @@ type windowsNotifier struct {
 func NewWindowsNotifier() Notifier {
 	iconPath, registrationErr := ensureAppRegistration()
 	ensureBannerEnabled()
+	window := foregroundWindow()
 	notifier := &windowsNotifier{
-		registrationErr:  registrationErr,
-		iconURI:          fileURI(iconPath),
-		activationWindow: foregroundWindow(),
-		activations:      make(chan Activation, 16),
-		targets:          make(map[string]activationTarget),
+		registrationErr:   registrationErr,
+		iconURI:           fileURI(iconPath),
+		activationProcess: windowProcessID(window),
+		activations:       make(chan Activation, 16),
+		targets:           make(map[string]activationTarget),
 	}
 	if err := notifier.startActivationBroker(); err != nil && notifier.registrationErr == nil {
 		notifier.registrationErr = fmt.Errorf("start notification activation broker: %w", err)
@@ -233,8 +234,8 @@ func (w *windowsNotifier) activationURI(target string) (string, error) {
 	query := activationURL.Query()
 	query.Set("port", w.activationPort)
 	query.Set("token", token)
-	if w.activationWindow != 0 {
-		query.Set("window", strconv.FormatUint(uint64(w.activationWindow), 10))
+	if w.activationProcess != 0 {
+		query.Set("process", strconv.FormatUint(uint64(w.activationProcess), 10))
 	}
 	activationURL.RawQuery = query.Encode()
 	return activationURL.String(), nil

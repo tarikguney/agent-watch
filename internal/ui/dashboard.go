@@ -298,10 +298,9 @@ func NewModel(
 	return m
 }
 
-// newPromptInput builds the single-line text input used to compose a broadcast
 // newPromptInput builds the multiline text area used to compose a broadcast
 // prompt. It is not focused until the user enters compose mode. Enter inserts a
-// newline; submission is handled by the compose-mode key router (Ctrl+D).
+// newline; submission is handled by the compose-mode key router (F2 or Ctrl+D).
 func newPromptInput() textarea.Model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a prompt to broadcast…  (Enter = newline)"
@@ -560,7 +559,8 @@ func (m Model) layout(now time.Time) (top, body, footer []string, spans []rowSpa
 		footer = append(footer, "", hline(tw))
 		if m.composing {
 			footer = append(footer,
-				helpKeyStyle.Render("  Ctrl+D")+helpTextStyle.Render(" Send  ")+
+				helpKeyStyle.Render("  F2")+helpTextStyle.Render(" Send  ")+
+					helpKeyStyle.Render("Ctrl+D")+helpTextStyle.Render(" Send  ")+
 					helpKeyStyle.Render("Enter")+helpTextStyle.Render(" New line  ")+
 					helpKeyStyle.Render("Esc")+helpTextStyle.Render(" Cancel"))
 		} else if m.killConfirmPID != 0 {
@@ -635,7 +635,7 @@ var (
 func (m Model) overlayComposeDialog(background string) string {
 	title := dialogTitleStyle.Render(
 		fmt.Sprintf("Broadcast prompt → %d target(s)", len(m.broadcastTargets())))
-	help := dialogHelpStyle.Render("Ctrl+D send   ·   Enter newline   ·   Esc cancel")
+	help := dialogHelpStyle.Render("F2 send   ·   Ctrl+D send   ·   Enter newline   ·   Esc cancel")
 
 	inner := lipgloss.JoinVertical(lipgloss.Left,
 		title,
@@ -945,11 +945,10 @@ func (m Model) startComposing() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// updateComposing routes key input to the prompt field while composing. Ctrl+D
-// broadcasts the prompt to the targets; Esc cancels without sending. Enter is
-// passed through to the text area as a newline (multiline input). Ctrl+D is used
-// for submit because Shift+Enter is not reliably distinguishable from Enter in a
-// terminal without an enhanced keyboard protocol.
+// updateComposing routes key input to the prompt field while composing. F2 and
+// Ctrl+D broadcast the prompt; Esc cancels without sending. F2 is the reliable
+// submit key when a Windows multiplexer cannot preserve Ctrl+D. Enter is passed
+// through to the text area as a newline.
 func (m Model) updateComposing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -957,7 +956,7 @@ func (m Model) updateComposing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.promptInput.Blur()
 		m.setStatusMessage("Broadcast cancelled", 2*time.Second)
 		return m, nil
-	case "ctrl+d":
+	case "f2", "ctrl+d":
 		prompt := strings.TrimSpace(m.promptInput.Value())
 		m.composing = false
 		m.promptInput.Blur()
@@ -1018,7 +1017,7 @@ func (m *Model) broadcast(prompt string) {
 			skipped++
 			continue
 		}
-		if err := tmux.SendPrompt(s.TmuxSendTarget, prompt); err != nil {
+		if err := tmux.SendPrompt(s.TmuxSendTarget, s.TmuxPaneID, prompt); err != nil {
 			failed++
 			log.Printf("broadcast to %s (%s) failed: %v", s.TmuxSendTarget, displayProjectName(s), err)
 			continue
