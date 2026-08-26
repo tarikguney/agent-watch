@@ -671,6 +671,9 @@ func TestProcessNotifications_IdleAfterWorkSendsNotification(t *testing.T) {
 	if notifier.titleAt(0) != "✓ demo is complete" {
 		t.Fatalf("unexpected notification title: %q", notifier.titleAt(0))
 	}
+	if got := notifier.notificationAt(0).ActivationTarget; got != `c:\work\demo` {
+		t.Fatalf("unexpected notification activation target: %q", got)
+	}
 }
 
 func TestProcessNotifications_CompletedAgoAfterWorkSendsNotification(t *testing.T) {

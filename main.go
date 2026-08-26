@@ -110,6 +110,9 @@ func run(
 	}
 
 	notifier := notify.NewWindowsNotifier()
+	if closer, ok := notifier.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
 	if testWindowsNotification {
 		return runWindowsNotificationTest(notifier)
 	}

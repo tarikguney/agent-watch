@@ -24,8 +24,10 @@ import (
 
 const (
 	appRegistrationKey = `SOFTWARE\Classes\AppUserModelId\` + appID
+	protocolKey        = `SOFTWARE\Classes\` + protocolScheme
 	shortcutName       = "Agent Watch.lnk"
 	legacyShortcutName = "agent-watch.lnk"
+	activationScript   = "activate-notification.ps1"
 
 	clsctxInprocServer      = 1
 	coinitApartmentThreaded = 2
@@ -37,6 +39,8 @@ var (
 	procCoInitializeEx   = ole32.NewProc("CoInitializeEx")
 	procCoUninitialize   = ole32.NewProc("CoUninitialize")
 	procCoCreateInstance = ole32.NewProc("CoCreateInstance")
+	user32               = windows.NewLazySystemDLL("user32.dll")
+	procGetForegroundWnd = user32.NewProc("GetForegroundWindow")
 
 	clsidShellLink   = mustGUID("{00021401-0000-0000-C000-000000000046}")
 	iidShellLinkW    = mustGUID("{000214F9-0000-0000-C000-000000000046}")
@@ -48,11 +52,6 @@ var (
 		PropertyID: 5,
 	}
 )
-
-type windowsNotifier struct {
-	registrationErr error
-	iconURI         string
-}
 
 type iUnknown struct {
 	vtable *iUnknownVTable
@@ -156,6 +155,13 @@ func ensureAppRegistration() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	scriptPath := filepath.Join(filepath.Dir(iconPath), activationScript)
+	if err := ensureActivationScript(scriptPath); err != nil {
+		return "", err
+	}
+	if err := registerActivationProtocol(scriptPath); err != nil {
+		return "", err
+	}
 	if err := registerAppMetadata(executable, iconPath); err != nil {
 		return "", err
 	}
@@ -182,6 +188,113 @@ func ensureAppRegistration() (string, error) {
 		return "", fmt.Errorf("record registered executable path: %w", err)
 	}
 	return iconPath, nil
+}
+
+func ensureActivationScript(path string) error {
+	const script = `param([Parameter(Mandatory = $true)][string]$ActivationUri)
+$ErrorActionPreference = 'Stop'
+
+try {
+    $uri = [Uri]$ActivationUri
+    if ($uri.Scheme -ne 'agent-watch') {
+        exit 2
+    }
+
+    $parameters = @{}
+    foreach ($part in $uri.Query.TrimStart('?').Split('&')) {
+        if ([string]::IsNullOrWhiteSpace($part)) {
+            continue
+        }
+        $pair = $part.Split('=', 2)
+        $name = [Uri]::UnescapeDataString($pair[0])
+        $value = if ($pair.Length -eq 2) { [Uri]::UnescapeDataString($pair[1]) } else { '' }
+        $parameters[$name] = $value
+    }
+
+    [int]$port = 0
+    if (-not [int]::TryParse($parameters['port'], [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+        exit 3
+    }
+    $token = $parameters['token']
+    if ($token -notmatch '^[0-9a-f]{48}$') {
+        exit 4
+    }
+
+    $callback = "http://127.0.0.1:$port/activate/$token"
+    Invoke-WebRequest -UseBasicParsing -Method Post -Uri $callback -TimeoutSec 5 | Out-Null
+
+    [long]$window = 0
+    if ([long]::TryParse($parameters['window'], [ref]$window) -and $window -ne 0) {
+        Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class AgentWatchWindow {
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+'@
+        [AgentWatchWindow]::ShowWindow([IntPtr]$window, 9) | Out-Null
+        [AgentWatchWindow]::SetForegroundWindow([IntPtr]$window) | Out-Null
+    }
+} catch {
+    exit 1
+}
+`
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		return fmt.Errorf("write notification activation script: %w", err)
+	}
+	return nil
+}
+
+func registerActivationProtocol(scriptPath string) error {
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, protocolKey, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("create notification protocol key: %w", err)
+	}
+	if err := key.SetStringValue("", "URL:Agent Watch Protocol"); err != nil {
+		key.Close()
+		return fmt.Errorf("set notification protocol name: %w", err)
+	}
+	if err := key.SetStringValue("URL Protocol", ""); err != nil {
+		key.Close()
+		return fmt.Errorf("mark notification protocol as URL protocol: %w", err)
+	}
+	key.Close()
+
+	commandKey, _, err := registry.CreateKey(
+		registry.CURRENT_USER,
+		protocolKey+`\shell\open\command`,
+		registry.SET_VALUE,
+	)
+	if err != nil {
+		return fmt.Errorf("create notification protocol command: %w", err)
+	}
+	defer commandKey.Close()
+
+	if err := commandKey.SetStringValue("", activationProtocolCommand(scriptPath)); err != nil {
+		return fmt.Errorf("set notification protocol command: %w", err)
+	}
+	return nil
+}
+
+func activationProtocolCommand(scriptPath string) string {
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		systemRoot = `C:\Windows`
+	}
+	powerShell := filepath.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	return fmt.Sprintf(
+		`"%s" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "%s" "%%1"`,
+		powerShell,
+		scriptPath,
+	)
+}
+
+func foregroundWindow() uintptr {
+	window, _, _ := procGetForegroundWnd.Call()
+	return window
 }
 
 func registerAppMetadata(executable, iconPath string) error {

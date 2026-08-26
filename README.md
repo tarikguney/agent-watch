@@ -141,7 +141,9 @@ The prompt is delivered by typing it into each agent's multiplexer pane and subm
 
 ## Windows notifications
 
-On Windows, `agent-watch` sends adaptive native notifications when a session transitions to **response complete** (`Idle` after active work), **Done**, or **Error**. Each toast includes an Agent Watch robot icon and styled lines for the provider, prompt, and response. The title uses the full tmux/psmux `session/window` name when available, otherwise the project name. Notifications are enabled by default on Windows, can be disabled globally with `--windows-notifications=false`, and can be muted for a selected row during the current run with `m`.
+On Windows, `agent-watch` sends adaptive native notifications when a session transitions to **response complete** (`Idle` after active work), **Done**, or **Error**. Each toast includes an Agent Watch robot icon and styled lines for the provider, prompt, and response. The title uses the full tmux/psmux `session/window` name when available, otherwise the project name. Click a notification to switch the existing multiplexer client to that exact session, window, and pane and bring its Windows Terminal window forward. Registration is automatic on launch; no setup script or administrator access is required. The originating `agent-watch` process must still be running when the notification is clicked.
+
+Notifications are enabled by default on Windows, can be disabled globally with `--windows-notifications=false`, and can be muted for a selected row during the current run with `m`.
 
 ## Platform support
 

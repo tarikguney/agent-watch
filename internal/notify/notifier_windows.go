@@ -7,14 +7,22 @@
 package notify
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"net"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
 	"unicode/utf16"
 
 	"golang.org/x/sys/windows/registry"
@@ -22,13 +30,17 @@ import (
 
 const (
 	appID            = "agent-watch"
+	protocolScheme   = "agent-watch"
 	notifySettingKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\` + appID
+	activationTTL    = 24 * time.Hour
 )
 
 type toastDocument struct {
-	XMLName xml.Name    `xml:"toast"`
-	Visual  toastVisual `xml:"visual"`
-	Audio   toastAudio  `xml:"audio"`
+	XMLName        xml.Name    `xml:"toast"`
+	Launch         string      `xml:"launch,attr,omitempty"`
+	ActivationType string      `xml:"activationType,attr,omitempty"`
+	Visual         toastVisual `xml:"visual"`
+	Audio          toastAudio  `xml:"audio"`
 }
 
 type toastVisual struct {
@@ -58,16 +70,40 @@ type toastAudio struct {
 	Source string `xml:"src,attr"`
 }
 
+type activationTarget struct {
+	target    string
+	expiresAt time.Time
+}
+
+type windowsNotifier struct {
+	registrationErr  error
+	iconURI          string
+	activationPort   string
+	activationWindow uintptr
+	activations      chan Activation
+	server           *http.Server
+	listener         net.Listener
+	mu               sync.Mutex
+	targets          map[string]activationTarget
+}
+
 // NewWindowsNotifier returns the native Windows notifier implementation.
 // It also ensures Windows is configured to show banners for our app, since
 // unpackaged CLI apps default to delivering toasts silently to Action Center.
 func NewWindowsNotifier() Notifier {
 	iconPath, registrationErr := ensureAppRegistration()
 	ensureBannerEnabled()
-	return windowsNotifier{
-		registrationErr: registrationErr,
-		iconURI:         fileURI(iconPath),
+	notifier := &windowsNotifier{
+		registrationErr:  registrationErr,
+		iconURI:          fileURI(iconPath),
+		activationWindow: foregroundWindow(),
+		activations:      make(chan Activation, 16),
+		targets:          make(map[string]activationTarget),
 	}
+	if err := notifier.startActivationBroker(); err != nil && notifier.registrationErr == nil {
+		notifier.registrationErr = fmt.Errorf("start notification activation broker: %w", err)
+	}
+	return notifier
 }
 
 // ensureBannerEnabled sets the per-app notification keys so the toast banner
@@ -88,12 +124,21 @@ func ensureBannerEnabled() {
 	}
 }
 
-func (w windowsNotifier) Notify(n Notification) error {
+func (w *windowsNotifier) Notify(n Notification) error {
 	if w.registrationErr != nil {
 		return fmt.Errorf("register Windows notification app: %w", w.registrationErr)
 	}
 
-	content, err := buildToastXML(n, w.iconURI)
+	launchURI := ""
+	if n.ActivationTarget != "" {
+		var err error
+		launchURI, err = w.activationURI(n.ActivationTarget)
+		if err != nil {
+			return fmt.Errorf("create notification activation: %w", err)
+		}
+	}
+
+	content, err := buildToastXML(n, w.iconURI, launchURI)
 	if err != nil {
 		return err
 	}
@@ -124,11 +169,114 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $document
 	return cmd.Run()
 }
 
-func (windowsNotifier) Supported() bool {
+func (*windowsNotifier) Supported() bool {
 	return true
 }
 
-func buildToastXML(n Notification, iconURI string) ([]byte, error) {
+func (w *windowsNotifier) Activations() <-chan Activation {
+	return w.activations
+}
+
+func (w *windowsNotifier) Close() error {
+	if w.server == nil {
+		return nil
+	}
+	return w.server.Close()
+}
+
+func (w *windowsNotifier) startActivationBroker() error {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/activate/", w.handleActivation)
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		listener.Close()
+		return fmt.Errorf("resolve activation broker port: %w", err)
+	}
+	w.listener = listener
+	w.activationPort = port
+	w.server = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 2 * time.Second,
+	}
+	go func() {
+		_ = w.server.Serve(listener)
+	}()
+	return nil
+}
+
+func (w *windowsNotifier) activationURI(target string) (string, error) {
+	tokenBytes := make([]byte, 24)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(tokenBytes)
+
+	now := time.Now()
+	w.mu.Lock()
+	for existingToken, existingTarget := range w.targets {
+		if now.After(existingTarget.expiresAt) {
+			delete(w.targets, existingToken)
+		}
+	}
+	w.targets[token] = activationTarget{
+		target:    target,
+		expiresAt: now.Add(activationTTL),
+	}
+	w.mu.Unlock()
+
+	activationURL := &url.URL{Scheme: protocolScheme, Host: "activate"}
+	query := activationURL.Query()
+	query.Set("port", w.activationPort)
+	query.Set("token", token)
+	if w.activationWindow != 0 {
+		query.Set("window", strconv.FormatUint(uint64(w.activationWindow), 10))
+	}
+	activationURL.RawQuery = query.Encode()
+	return activationURL.String(), nil
+}
+
+func (w *windowsNotifier) handleActivation(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	token := strings.TrimPrefix(request.URL.Path, "/activate/")
+	if token == "" || strings.Contains(token, "/") {
+		http.NotFound(response, request)
+		return
+	}
+
+	now := time.Now()
+	w.mu.Lock()
+	target, ok := w.targets[token]
+	if ok && now.After(target.expiresAt) {
+		delete(w.targets, token)
+		ok = false
+	}
+	w.mu.Unlock()
+	if !ok {
+		http.NotFound(response, request)
+		return
+	}
+
+	select {
+	case w.activations <- Activation{Target: target.target}:
+		w.mu.Lock()
+		delete(w.targets, token)
+		w.mu.Unlock()
+		response.WriteHeader(http.StatusNoContent)
+	case <-time.After(2 * time.Second):
+		http.Error(response, "activation queue unavailable", http.StatusServiceUnavailable)
+	}
+}
+
+func buildToastXML(n Notification, iconURI, launchURI string) ([]byte, error) {
 	text := []toastText{
 		{Style: "title", Wrap: "true", Value: n.Title},
 	}
@@ -168,6 +316,7 @@ func buildToastXML(n Notification, iconURI string) ([]byte, error) {
 	})
 
 	document := toastDocument{
+		Launch: launchURI,
 		Visual: toastVisual{
 			Binding: toastBinding{
 				Template: "ToastGeneric",
@@ -177,6 +326,9 @@ func buildToastXML(n Notification, iconURI string) ([]byte, error) {
 		Audio: toastAudio{
 			Source: "ms-winsoundevent:Notification.Default",
 		},
+	}
+	if launchURI != "" {
+		document.ActivationType = "protocol"
 	}
 	if iconURI != "" {
 		document.Visual.Binding.Image = &toastImage{

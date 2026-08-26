@@ -220,6 +220,8 @@ func truncate(s string, maxWidth int) string {
 
 type tickMsg time.Time
 
+type notificationActivationMsg notify.Activation
+
 type sortMode string
 
 const (
@@ -229,32 +231,33 @@ const (
 
 // Model is the Bubbletea model for the agent-watch dashboard.
 type Model struct {
-	scanner               *session.Scanner
-	compact               bool
-	refresh               time.Duration
-	providerFilter        string
-	sortMode              sortMode
-	sessions              []session.State
-	cursorIdx             int
-	scrollOffset          int
-	expanded              map[int]bool
-	termW                 int
-	termH                 int
-	statusMsg             string
-	statusExp             time.Time
-	notifier              notify.Notifier
-	notificationsEnabled  bool
-	mutedNotifications    map[string]bool
-	notificationStates    map[string]session.Status
-	notificationLastSent  map[string]time.Time
-	notificationStartedAt time.Time
-	killConfirmPID        int
-	killConfirmLabel      string
-	killing               map[int]bool
-	marked                map[int]bool
-	composing             bool
-	promptInput           textarea.Model
-	selfSendTarget        string
+	scanner                 *session.Scanner
+	compact                 bool
+	refresh                 time.Duration
+	providerFilter          string
+	sortMode                sortMode
+	sessions                []session.State
+	cursorIdx               int
+	scrollOffset            int
+	expanded                map[int]bool
+	termW                   int
+	termH                   int
+	statusMsg               string
+	statusExp               time.Time
+	notifier                notify.Notifier
+	notificationsEnabled    bool
+	mutedNotifications      map[string]bool
+	notificationStates      map[string]session.Status
+	notificationLastSent    map[string]time.Time
+	notificationStartedAt   time.Time
+	notificationActivations <-chan notify.Activation
+	killConfirmPID          int
+	killConfirmLabel        string
+	killing                 map[int]bool
+	marked                  map[int]bool
+	composing               bool
+	promptInput             textarea.Model
+	selfSendTarget          string
 }
 
 // NewModel creates a new dashboard Model, pre-populated with the scanner's
@@ -289,6 +292,9 @@ func NewModel(
 		promptInput:           newPromptInput(),
 	}
 	m.selfSendTarget = tmux.SelfTarget()
+	if source, ok := notifier.(notify.ActivationSource); ok {
+		m.notificationActivations = source.Activations()
+	}
 	return m
 }
 
@@ -307,9 +313,12 @@ func newPromptInput() textarea.Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Every(m.refresh, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
+	return tea.Batch(
+		tea.Every(m.refresh, func(t time.Time) tea.Msg {
+			return tickMsg(t)
+		}),
+		waitForNotificationActivation(m.notificationActivations),
+	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -347,6 +356,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Every(m.refresh, func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		})
+
+	case notificationActivationMsg:
+		m.activateNotification(msg.Target)
+		return m, waitForNotificationActivation(m.notificationActivations)
 
 	case tea.KeyMsg:
 		if m.killConfirmPID != 0 {
@@ -428,23 +441,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			sortSessions(m.sessions, m.sortMode)
 		case "g", "G":
 			if m.cursorIdx < len(m.sessions) {
-				s := m.sessions[m.cursorIdx]
-				if s.TmuxSession == "" {
-					m.statusMsg = "Session not in tmux"
-					m.statusExp = time.Now().Add(3 * time.Second)
-				} else if err := tmux.SwitchToPane(s.TmuxSession, s.TmuxPaneID); err == nil {
-					m.statusMsg = fmt.Sprintf("Switched to %s", s.TmuxSession)
-					m.statusExp = time.Now().Add(3 * time.Second)
-				} else {
-					// Programmatic switch failed — show manual navigation hint
-					parts := strings.SplitN(s.TmuxSession, "/", 2)
-					hint := "Ctrl+B, s"
-					if len(parts) == 2 {
-						hint = fmt.Sprintf("Ctrl+B, s → select \"%s\" → window \"%s\"", parts[0], parts[1])
-					}
-					m.statusMsg = fmt.Sprintf("Go to: %s  |  %s", s.TmuxSession, hint)
-					m.statusExp = time.Now().Add(5 * time.Second)
-				}
+				m.switchToSession(m.sessions[m.cursorIdx])
 			}
 		case "x", "X":
 			if m.cursorIdx < len(m.sessions) {
@@ -822,6 +819,52 @@ func (m *Model) setStatusMessage(msg string, duration time.Duration) {
 	m.statusExp = time.Now().Add(duration)
 }
 
+func waitForNotificationActivation(activations <-chan notify.Activation) tea.Cmd {
+	if activations == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		activation, ok := <-activations
+		if !ok {
+			return nil
+		}
+		return notificationActivationMsg(activation)
+	}
+}
+
+func (m *Model) activateNotification(target string) {
+	if target == "" || m.scanner == nil {
+		m.setStatusMessage("Notification session is no longer available", 4*time.Second)
+		return
+	}
+
+	for _, state := range notificationSessionCandidates(m.scanner.Sessions()) {
+		if sessionNotificationKey(state) == target && state.PID > 0 {
+			m.switchToSession(state)
+			return
+		}
+	}
+	m.setStatusMessage("Notification session is no longer running", 4*time.Second)
+}
+
+func (m *Model) switchToSession(state session.State) {
+	if state.TmuxSession == "" {
+		m.setStatusMessage("Session not in tmux", 3*time.Second)
+		return
+	}
+	if err := tmux.SwitchToPane(state.TmuxSession, state.TmuxPaneID); err == nil {
+		m.setStatusMessage(fmt.Sprintf("Switched to %s", state.TmuxSession), 3*time.Second)
+		return
+	}
+
+	parts := strings.SplitN(state.TmuxSession, "/", 2)
+	hint := "Ctrl+B, s"
+	if len(parts) == 2 {
+		hint = fmt.Sprintf("Ctrl+B, s → select \"%s\" → window \"%s\"", parts[0], parts[1])
+	}
+	m.setStatusMessage(fmt.Sprintf("Go to: %s  |  %s", state.TmuxSession, hint), 5*time.Second)
+}
+
 // toggleMark flips the broadcast selection for a session PID. PIDs <= 0 can't
 // be marked because they have no addressable process/pane.
 func (m *Model) toggleMark(pid int) {
@@ -1149,12 +1192,13 @@ func notificationForSession(s session.State) notify.Notification {
 	project = truncateNotificationLine(project, 60)
 
 	return notify.Notification{
-		Title:    title,
-		Message:  strings.Join([]string{"Project: " + project, "Prompt: " + prompt, "Response: " + response}, "\n"),
-		Project:  project,
-		Source:   providerLabel(s),
-		Prompt:   prompt,
-		Response: response,
+		Title:            title,
+		Message:          strings.Join([]string{"Project: " + project, "Prompt: " + prompt, "Response: " + response}, "\n"),
+		Project:          project,
+		Source:           providerLabel(s),
+		Prompt:           prompt,
+		Response:         response,
+		ActivationTarget: sessionNotificationKey(s),
 	}
 }
 

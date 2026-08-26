@@ -233,14 +233,18 @@ func SwitchToPane(target string, paneID string) error {
 	if targetWindow != "" {
 		wCmd := exec.Command(bin, "select-window", "-t", targetSession+":"+targetWindow)
 		wCmd.Env = envWithSession(targetSession)
-		_ = wCmd.Run()
+		if out, err := wCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("select-window: %s", strings.TrimSpace(string(out)))
+		}
 	}
 
 	// 3. Select the specific pane if we have a pane ID
 	if paneID != "" {
 		pCmd := exec.Command(bin, "select-pane", "-t", paneID)
 		pCmd.Env = envWithSession(targetSession)
-		_ = pCmd.Run()
+		if out, err := pCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("select-pane: %s", strings.TrimSpace(string(out)))
+		}
 	}
 
 	return nil
