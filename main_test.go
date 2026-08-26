@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestNormalizeProvider(t *testing.T) {
 	t.Parallel()
@@ -84,5 +87,14 @@ func TestNewScannerInvalidProvider(t *testing.T) {
 	want := `invalid --provider "unknown" (must be one of: all, claude, copilot)`
 	if err.Error() != want {
 		t.Fatalf("expected %q, got %q", want, err.Error())
+	}
+}
+
+func TestDefaultCopilotDirUsesCopilotHome(t *testing.T) {
+	copilotHome := filepath.Join(t.TempDir(), ".copilot")
+	t.Setenv("COPILOT_HOME", copilotHome)
+
+	if got := defaultCopilotDir(); got != copilotHome {
+		t.Fatalf("expected %q, got %q", copilotHome, got)
 	}
 }

@@ -332,6 +332,10 @@ func defaultClaudeDir() string {
 }
 
 func defaultCopilotDir() string {
+	if copilotHome := os.Getenv("COPILOT_HOME"); copilotHome != "" {
+		return copilotHome
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join("~", ".copilot")

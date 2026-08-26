@@ -70,6 +70,10 @@ agent-watch --windows-notifications=false
 agent-watch --test-windows-notification
 ```
 
+By default, Copilot sessions are read from `$COPILOT_HOME/session-state` when
+`COPILOT_HOME` is set. Otherwise, agent-watch falls back to the standard
+`~/.copilot` location. `--copilot-dir` overrides both.
+
 ## Keyboard shortcuts
 
 | Key | Action |
