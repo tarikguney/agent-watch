@@ -5,6 +5,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -282,10 +283,6 @@ func (p *claudeProvider) MatchProcesses(sessions map[string]*State, procs []Proc
 	}
 
 	for _, proc := range procs {
-		if proc.SessionID == "" {
-			continue
-		}
-
 		projectDir := ""
 		if proc.Cwd != "" {
 			encoded := EncodeProjectDir(proc.Cwd)
@@ -339,6 +336,11 @@ func (p *claudeProvider) MatchProcesses(sessions map[string]*State, procs []Proc
 		bestPath := ""
 		var bestMod time.Time
 		for path, state := range sessions {
+			// Skip transcripts already claimed by another process this pass, so two
+			// id-less sessions in the same cwd don't collapse onto one row.
+			if state.PID != 0 {
+				continue
+			}
 			if filepath.Dir(path) == projectDir {
 				if state.FileModTime.After(bestMod) || (bestPath == "" && !state.FileModTime.After(bestMod)) {
 					bestPath = path
@@ -414,7 +416,11 @@ func createWaitingSession(sessions map[string]*State, proc ProcessInfo, tmuxSess
 	if proc.Cwd == "" {
 		return
 	}
-	sessions["placeholder:"+proc.SessionID] = &State{
+	key := proc.SessionID
+	if key == "" {
+		key = fmt.Sprintf("pid-%d", proc.PID)
+	}
+	sessions["placeholder:"+key] = &State{
 		SessionID:      proc.SessionID,
 		Provider:       "claude",
 		PID:            proc.PID,
